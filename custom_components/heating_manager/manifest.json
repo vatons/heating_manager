@@ -1,0 +1,12 @@
+{
+  "domain": "heating_manager",
+  "name": "Heating Manager",
+  "version": "1.0.0",
+  "issue_tracker": "https://github.com/vatons/dynamic_timers/issues",
+  "documentation": "https://github.com/vatons/dynamic_timers/README.md",
+  "codeowners": ["@vatons"],
+  "config_flow": false,
+  "dependencies": [],
+  "requirements": [],
+  "iot_class": "local_polling"
+}

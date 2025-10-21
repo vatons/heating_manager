@@ -1,0 +1,104 @@
+# heating_manager.yaml
+update_interval: 60 # seconds between logic updates
+fallback_mode: "zone_average" # or "trv" / "last_known"
+minimum_temp: 17 # Default temperature when no schedule is active (°C)
+frost_protection_temp: 15 # Temperature for away mode (°C)
+heating_demand_mode: "zone_average" # "any_room" or "zone_average" - How to calculate zone heating demand
+
+zones:
+  zone_1:
+    name: "Downstairs"
+    schedule:
+      weekday:
+        - { start: "06:30", end: "21:00", temperature: 19.5 }
+      weekend:
+        - { start: "06:30", end: "21:00", temperature: 19.5 }
+    rooms:
+      kitchen_dining:
+        name: "Kitchen/Dining"
+        trvs:
+          - climate.kitchen_trv
+          - climate.dining_room_trv
+        sensors:
+          - temperature: sensor.kitchen_dining_room_1_temperature
+            last_seen: sensor.kitchen_dining_room_1_last_seen
+          - temperature: sensor.kitchen_dining_room_2_temperature
+            last_seen: sensor.kitchen_dining_room_2_last_seen
+          - temperature: sensor.kitchen_dining_room_3_temperature
+            last_seen: sensor.kitchen_dining_room_3_last_seen
+
+      hallway:
+        name: "Hallway"
+        trvs:
+          - climate.hallway_trv
+        sensors:
+          - sensor.hallway_temperature
+
+      lounge:
+        name: "Lounge"
+        trvs:
+          - climate.lounge_trv
+        sensors:
+          - temperature: sensor.lounge_temperature
+            last_seen: sensor.lounge_last_seen
+
+  zone_2:
+    name: "Zone 2"
+    schedule:
+      weekday:
+        - { start: "06:30", end: "21:00", temperature: 18.5 }
+      weekend:
+        - { start: "06:30", end: "21:00", temperature: 18.5 }
+    rooms:
+      bedroom_1:
+        name: "Bedroom 1"
+        trvs:
+          - climate.bedroom_1_trv
+        sensors:
+          - temperature: sensor.bedroom_1_temperature
+            last_seen: sensor.bedroom_1_last_seen
+
+      bedroom_2:
+        name: "Bedroom 2"
+        trvs:
+          - climate.bedroom_2_trv
+        sensors:
+          - temperature: sensor.bedroom_2_temperature
+            last_seen: sensor.bedroom_2_last_seen
+
+      bedroom_3:
+        name: "Bedroom 3"
+        trvs:
+          - climate.bedroom_3_trv
+        sensors:
+          - temperature: sensor.bedroom_3_temperature
+            last_seen: sensor.bedroom_3_last_seen
+
+      bedroom_4:
+        name: "Bedroom 4"
+        trvs:
+          - climate.bedroom_4_trv
+        sensors:
+          - temperature: sensor.bedroom_4_temperature
+            last_seen: sensor.bedroom_4_last_seen
+
+      bedroom_5:
+        name: "Bedroom 5"
+        trvs:
+          - climate.bedroom_5_trv
+        sensors:
+          - temperature: sensor.bedroom_5_temperature
+            last_seen: sensor.bedroom_5_last_seen
+
+      bathroom:
+        name: "Bathroom"
+        sensors:
+          - temperature: sensor.bathroom_temperature
+            last_seen: sensor.bathroom_last_seen
+
+
+      ensuite:
+        name: "Ensuite"
+        sensors:
+          - temperature: sensor.ensuite_temperature
+            last_seen: sensor.ensuite_last_seen
