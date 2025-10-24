@@ -7,6 +7,7 @@ A comprehensive Home Assistant custom component for managing multi-zone heating 
 - **Multi-Zone Management**: Organize your heating into logical zones (e.g., upstairs, downstairs)
 - **Schedule-Based Control**: Define weekday and weekend heating schedules for each zone
 - **Room-Level Boost**: Temporarily boost individual rooms without affecting the rest of the zone
+- **Per-Room Temperature Offsets**: Set individual temperature adjustments for specific rooms within a zone (e.g., keep bedroom 2°C cooler than the rest of the zone)
 - **Intelligent TRV Control**:
   - Self-learning offset compensation for TRV internal sensors
   - Exponential moving average (EMA) for efficient offset tracking
@@ -17,7 +18,7 @@ A comprehensive Home Assistant custom component for managing multi-zone heating 
   - Average multiple temperature sensors per room
   - Optional dedicated last_seen sensors for accurate timestamps
   - Automatic fallback when sensors go offline
-  - Configurable sensor timeout (default: 15 minutes)
+  - Configurable sensor timeout (default: 30 minutes)
   - Mixed sensor format support (simple and extended)
 - **Smart Heating Logic**:
   - Intelligent deadband prevents short-cycling while ensuring responsiveness
@@ -27,8 +28,13 @@ A comprehensive Home Assistant custom component for managing multi-zone heating 
   - Room, Zone, and Global climate entities
   - Structured attributes with grouped data (boost, temperature, config, TRV control)
   - Full schedule visibility in zone attributes (current and next periods)
+- **Heating Analytics**:
+  - Track heating and cooling rates per room
+  - Estimate time to reach target temperature (ETA)
+  - Trend analysis and confidence scoring
+  - Persistent history across restarts
 - **Away Mode**: Set all zones to frost protection temperature
-- **Persistent State**: Boost timers, learned offsets, and settings survive restarts
+- **Persistent State**: Boost timers, learned offsets, analytics history, and settings survive restarts
 
 ## Installation
 
@@ -59,6 +65,7 @@ update_interval: 60  # seconds between logic updates
 fallback_mode: "zone_average"  # or "trv" / "last_known"
 minimum_temp: 15  # Default temperature when no schedule is active (°C)
 frost_protection_temp: 15  # Temperature for away mode (°C)
+boost_duration: 30  # Default duration for room boost in minutes (default: 30)
 heating_demand_mode: "any_room"  # "any_room" or "zone_average" - How to calculate zone heating demand
 heating_deadband: 0.3  # Temperature difference before stopping heating (°C) - prevents short cycling
 
@@ -68,6 +75,12 @@ trv_overshoot_max: 5.0  # Maximum boost above learned offset (°C) - increase if
 trv_overshoot_threshold: 0.3  # Temperature above target to trigger cooling (°C)
 trv_cooldown_offset: 1.0  # Temperature below target to set for faster cooling (°C)
 trv_offset_ema_alpha: 0.15  # EMA smoothing factor (0.1=stable, 0.2=responsive)
+
+# Heating Analytics (tracks temperature trends and estimates heating performance)
+analytics_enabled: true  # Enable heating analytics (default: true)
+analytics_history_size: 30  # Number of readings to keep per room (default: 30)
+analytics_min_samples: 3  # Minimum samples needed for calculations (default: 3)
+derivative_smoothing_factor: 0.3  # EMA smoothing for rate calculations (default: 0.3)
 
 zones:
   downstairs:
@@ -107,6 +120,7 @@ zones:
     rooms:
       bedroom:
         name: "Bedroom"
+        temperature_offset: -2.0  # Keep bedroom 2°C cooler than zone temperature
         trvs:
           - climate.bedroom_trv
         sensors:
@@ -351,7 +365,7 @@ The global sensor attributes include:
 ### Room Temperature Calculation
 
 1. **Multiple sensors**: Average all valid sensors
-2. **Sensor timeout**: If a sensor hasn't updated in 15 minutes, exclude it
+2. **Sensor timeout**: If a sensor hasn't updated in 30 minutes, exclude it
 3. **Single sensor timeout**: Fall back to other sensors in the room
 4. **All sensors timeout**: Fall back to zone average
 5. **No sensors**: Room boost is disabled
@@ -390,6 +404,49 @@ The system automatically uses the most accurate timestamp available and indicate
 - Boost is independent per room - other rooms in the zone continue following schedule
 - Boost state persists across Home Assistant restarts
 - When boost expires, room returns to scheduled temperature
+
+### Room Temperature Offsets
+
+You can configure individual temperature adjustments for specific rooms within a zone using the `temperature_offset` parameter. This allows you to maintain different comfort levels in different rooms while keeping them all on the same heating schedule.
+
+**Configuration:**
+```yaml
+rooms:
+  bedroom:
+    name: "Bedroom"
+    temperature_offset: -2.0  # This room will target 2°C below zone temperature
+    trvs:
+      - climate.bedroom_trv
+    sensors:
+      - sensor.bedroom_temp
+
+  office:
+    name: "Office"
+    temperature_offset: 1.5  # This room will target 1.5°C above zone temperature
+    trvs:
+      - climate.office_trv
+    sensors:
+      - sensor.office_temp
+```
+
+**How it works:**
+
+When the zone schedule sets a target temperature of 19.5°C:
+- Bedroom with `temperature_offset: -2.0` will target **17.5°C** (19.5 - 2.0)
+- Office with `temperature_offset: 1.5` will target **21.0°C** (19.5 + 1.5)
+- Rooms without an offset will target **19.5°C**
+
+**Common use cases:**
+- **Cooler bedrooms**: Many people prefer sleeping in cooler rooms (`temperature_offset: -2.0`)
+- **Warmer bathrooms**: Keep bathrooms slightly warmer for comfort (`temperature_offset: 1.0`)
+- **Passive rooms**: Rooms that naturally stay warmer (south-facing, smaller) can be offset lower
+- **Active rooms**: Home offices or living rooms can be offset higher during work hours
+
+**Important notes:**
+- The offset applies to **all** temperature sources (scheduled, manual, boost, and away mode)
+- Offsets can be positive (warmer) or negative (cooler)
+- The offset is applied after the zone target is determined, ensuring consistent behavior
+- Each room's heating demand and TRV control uses the offset-adjusted target
 
 ### Manual Override Detection
 
@@ -629,6 +686,49 @@ trv_offset_ema_alpha: 0.15         # EMA smoothing factor (default: 0.15)
 ✅ **Self-adapting**: Adjusts to changing conditions (radiator size, room airflow, etc.)
 
 **Note**: This feature requires TRVs that expose their internal `current_temperature` attribute to Home Assistant. Most modern smart TRVs support this.
+
+### Heating Analytics
+
+The integration includes an optional heating analytics system that tracks temperature history and calculates performance metrics for each room. This provides valuable insights into heating efficiency and helps estimate when rooms will reach their target temperatures.
+
+**Features:**
+- **Heating Rate**: Measures how quickly rooms heat up (°C per hour)
+- **Cooling Rate**: Measures how quickly rooms cool down (°C per hour)
+- **ETA Estimation**: Predicts when a room will reach its target temperature
+- **Confidence Scoring**: Indicates reliability of predictions (0.0-1.0)
+- **Trend Analysis**: Categorizes heating behavior (heating_rapidly, heating_slowly, stable, cooling_slowly, cooling_rapidly, insufficient_data)
+
+**Configuration:**
+```yaml
+analytics_enabled: true  # Enable heating analytics (default: true)
+analytics_history_size: 30  # Number of readings to keep per room (default: 30)
+analytics_min_samples: 3  # Minimum samples needed for calculations (default: 3)
+derivative_smoothing_factor: 0.3  # EMA smoothing for rate calculations (default: 0.3)
+```
+
+**Analytics data is available in room climate entity attributes:**
+```yaml
+heating_analytics:
+  heating_rate: 1.8  # °C per hour when heating
+  cooling_rate: -0.4  # °C per hour when not heating
+  eta_minutes: 45  # Estimated minutes to reach target
+  eta_timestamp: "2024-01-15T14:30:00+00:00"  # When target will be reached
+  confidence: 0.85  # Confidence in prediction (0.0-1.0)
+  samples_count: 15  # Number of samples used
+  trend: "heating_rapidly"  # Current heating trend
+```
+
+**Use cases:**
+- Monitor heating efficiency across different rooms
+- Identify rooms that heat/cool unusually slowly (possible insulation issues)
+- Build automations that pre-heat rooms before scheduled times
+- Display estimated time to reach target in UI dashboards
+
+**Disabling analytics:**
+If you don't need this feature, you can disable it to reduce storage and processing:
+```yaml
+analytics_enabled: false
+```
 
 ### Heating Demand Modes
 

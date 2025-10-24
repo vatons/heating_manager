@@ -653,6 +653,8 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
                 self._zone_id,
                 boosted_count,
             )
+            # Refresh coordinator to immediately update all room entities
+            await self.coordinator.async_request_refresh()
         elif preset_mode == "schedule":
             # Clear all boosts in this zone
             zone_config = self.coordinator.config.get("zones", {}).get(self._zone_id, {})
@@ -662,6 +664,8 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
                 await self.coordinator.clear_boost(self._zone_id, room_id)
 
             _LOGGER.info("Zone %s: Preset 'schedule' activated - all boosts cleared", self._zone_id)
+            # Refresh coordinator to immediately update all room entities
+            await self.coordinator.async_request_refresh()
 
         self.async_write_ha_state()
 
@@ -936,6 +940,8 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
                 "Global: Preset 'boost' activated - boosted %d rooms across all zones",
                 total_boosted,
             )
+            # Refresh coordinator to immediately update all entities
+            await self.coordinator.async_request_refresh()
         elif preset_mode == "schedule":
             # Clear away mode and all boosts
             if self.coordinator.away_mode:
@@ -948,6 +954,8 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
                     await self.coordinator.clear_boost(zone_id, room_id)
 
             _LOGGER.info("Global: Preset 'schedule' activated - all boosts cleared, away mode disabled")
+            # Refresh coordinator to immediately update all entities
+            await self.coordinator.async_request_refresh()
 
         self.async_write_ha_state()
 

@@ -11,6 +11,7 @@ from .const import (
     CONF_HEATING_DEMAND_MODE,
     CONF_ROOMS,
     CONF_SCHEDULE,
+    CONF_TEMPERATURE_OFFSET,
     DEFAULT_HEATING_DEMAND_MODE,
     DOMAIN,
     STORAGE_KEY,
@@ -193,6 +194,20 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                             room_id,
                         )
                         target_temp = self.minimum_temp
+
+                    # Apply room temperature offset if configured
+                    temperature_offset = room_config.get(CONF_TEMPERATURE_OFFSET, 0.0)
+                    if temperature_offset != 0.0:
+                        original_target = target_temp
+                        target_temp = target_temp + temperature_offset
+                        _LOGGER.debug(
+                            "Zone %s / Room %s: Applied temperature offset %.1f°C (%.1f°C -> %.1f°C)",
+                            zone_id,
+                            room_id,
+                            temperature_offset,
+                            original_target,
+                            target_temp,
+                        )
 
                     # Determine if room needs heating using smart deadband logic
                     needs_heating = self.heating_logic.calculate_heating_need(

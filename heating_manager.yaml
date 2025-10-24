@@ -36,6 +36,7 @@ zones:
 
       lounge:
         name: "Lounge"
+        temperature_offset: -1.0  # Room will be 1°C cooler than zone temperature
         trvs:
           - climate.lounge_trv
         sensors:
@@ -60,6 +61,7 @@ zones:
 
       bedroom_2:
         name: "Bedroom 2"
+        temperature_offset: -2.0  # Room will be 2°C cooler than zone temperature
         trvs:
           - climate.bedroom_2_trv
         sensors:
