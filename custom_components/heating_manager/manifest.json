@@ -3,7 +3,7 @@
   "name": "Heating Manager",
   "version": "1.0.0",
   "issue_tracker": "https://github.com/vatons/heating_manager/issues",
-  "documentation": "https://github.com/vatons/heating_manager/README.md",
+  "documentation": "https://github.com/vatons/heating_manager",
   "codeowners": ["@vatons"],
   "config_flow": false,
   "dependencies": [],
