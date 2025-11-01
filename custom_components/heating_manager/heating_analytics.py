@@ -32,21 +32,35 @@ class HeatingAnalytics:
         # Store smoothed derivatives: zone_id -> room_id -> {heating_rate, cooling_rate}
         self.smoothed_rates: dict[str, dict[str, dict]] = {}
 
+        # Track previous state for intelligent recording decisions
+        # zone_id -> room_id -> {last_temp, last_zone_heating, last_timestamp}
+        self.last_state: dict[str, dict[str, dict]] = {}
+
+        # Minimum temperature change to consider recording (avoids noise)
+        self.min_temp_change = 0.05  # 0.05°C
+
     def record_temperature(
         self,
         zone_id: str,
         room_id: str,
         temp: float,
         needs_heating: bool,
+        zone_heating_active: bool,
         timestamp: datetime | None = None,
     ) -> None:
-        """Record a temperature reading for history tracking.
+        """Record a temperature reading for history tracking with state-aware logic.
+
+        Only records when:
+        - Zone heating is active AND temperature is changing
+        - Zone heating state transitions occur
+        - Significant temperature changes occur
 
         Args:
             zone_id: Zone identifier
             room_id: Room identifier
             temp: Temperature reading
             needs_heating: Whether the room currently needs heating
+            zone_heating_active: Whether the zone's boiler/heat pump is actually running
             timestamp: Timestamp of reading (defaults to now)
         """
         if timestamp is None:
@@ -58,19 +72,92 @@ class HeatingAnalytics:
         if room_id not in self.temp_history[zone_id]:
             self.temp_history[zone_id][room_id] = deque(maxlen=self.history_size)
 
-        # Add entry to history
-        entry = TemperatureHistoryEntry(
-            timestamp=timestamp, temperature=temp, needs_heating=needs_heating
-        )
-        self.temp_history[zone_id][room_id].append(entry)
+        if zone_id not in self.last_state:
+            self.last_state[zone_id] = {}
+        if room_id not in self.last_state[zone_id]:
+            self.last_state[zone_id][room_id] = {}
 
-        _LOGGER.debug(
-            "Recorded temperature for %s/%s: %.1f°C (needs_heating=%s)",
-            zone_id,
-            room_id,
-            temp,
-            needs_heating,
-        )
+        last_state = self.last_state[zone_id][room_id]
+        last_temp = last_state.get("last_temp")
+        last_zone_heating = last_state.get("last_zone_heating")
+        last_timestamp = last_state.get("last_timestamp")
+
+        # Decide if we should record this sample
+        should_record = False
+        record_reason = ""
+
+        # Always record first sample
+        if last_temp is None:
+            should_record = True
+            record_reason = "initial"
+        else:
+            temp_change = abs(temp - last_temp)
+
+            # Record on zone heating state transition
+            if last_zone_heating is not None and zone_heating_active != last_zone_heating:
+                should_record = True
+                record_reason = "state_transition"
+
+            # Record when zone is heating and temperature is rising significantly
+            elif zone_heating_active and temp_change >= self.min_temp_change:
+                if temp > last_temp:  # Temperature rising
+                    should_record = True
+                    record_reason = "heating_active"
+                elif temp < last_temp:
+                    # Temperature falling while heating - could indicate problem or sensor noise
+                    # Record to capture potential issues
+                    should_record = True
+                    record_reason = "heating_temp_drop"
+
+            # Record when zone is NOT heating and temperature is falling significantly
+            elif not zone_heating_active and temp_change >= self.min_temp_change:
+                if temp < last_temp:  # Temperature falling
+                    should_record = True
+                    record_reason = "cooling_active"
+                elif temp > last_temp:
+                    # Temperature rising while not heating - external heat source or sensor noise
+                    should_record = True
+                    record_reason = "cooling_temp_rise"
+
+            # Record periodically even if idle to maintain some baseline (every ~10 minutes)
+            elif last_timestamp is not None:
+                time_since_last = (timestamp - last_timestamp).total_seconds()
+                if time_since_last > 600:  # 10 minutes
+                    should_record = True
+                    record_reason = "periodic_baseline"
+
+        # Update last state
+        self.last_state[zone_id][room_id] = {
+            "last_temp": temp,
+            "last_zone_heating": zone_heating_active,
+            "last_timestamp": timestamp,
+        }
+
+        # Record if criteria met
+        if should_record:
+            entry = TemperatureHistoryEntry(
+                timestamp=timestamp,
+                temperature=temp,
+                needs_heating=needs_heating,
+                zone_heating_active=zone_heating_active,
+            )
+            self.temp_history[zone_id][room_id].append(entry)
+
+            _LOGGER.debug(
+                "Recorded temperature for %s/%s: %.1f°C (zone_heating=%s, reason=%s)",
+                zone_id,
+                room_id,
+                temp,
+                zone_heating_active,
+                record_reason,
+            )
+        else:
+            _LOGGER.debug(
+                "Skipped recording for %s/%s: %.1f°C (no significant change)",
+                zone_id,
+                room_id,
+                temp,
+            )
 
     def _calculate_derivative(
         self, zone_id: str, room_id: str, heating_filter: bool | None
@@ -80,8 +167,8 @@ class HeatingAnalytics:
         Args:
             zone_id: Zone identifier
             room_id: Room identifier
-            heating_filter: If True, only use readings when needs_heating=True
-                          If False, only use readings when needs_heating=False
+            heating_filter: If True, only use readings when zone_heating_active=True
+                          If False, only use readings when zone_heating_active=False
                           If None, use all readings
 
         Returns:
@@ -92,9 +179,9 @@ class HeatingAnalytics:
 
         history = self.temp_history[zone_id][room_id]
 
-        # Filter history based on heating_filter
+        # Filter history based on zone heating state (not room needs_heating)
         if heating_filter is not None:
-            filtered_history = [e for e in history if e.needs_heating == heating_filter]
+            filtered_history = [e for e in history if e.zone_heating_active == heating_filter]
         else:
             filtered_history = list(history)
 
@@ -191,6 +278,54 @@ class HeatingAnalytics:
 
         return room_rates["heating_rate"], room_rates["cooling_rate"]
 
+    def _calculate_rate_variance(
+        self, zone_id: str, room_id: str, heating_filter: bool | None
+    ) -> float | None:
+        """Calculate variance in temperature change rates.
+
+        Args:
+            zone_id: Zone identifier
+            room_id: Room identifier
+            heating_filter: If True, only use heating readings; False for cooling; None for all
+
+        Returns:
+            Standard deviation of rates, or None if insufficient data
+        """
+        if zone_id not in self.temp_history or room_id not in self.temp_history[zone_id]:
+            return None
+
+        history = self.temp_history[zone_id][room_id]
+
+        # Filter history based on zone heating state
+        if heating_filter is not None:
+            filtered_history = [e for e in history if e.zone_heating_active == heating_filter]
+        else:
+            filtered_history = list(history)
+
+        if len(filtered_history) < self.min_samples:
+            return None
+
+        # Calculate derivatives
+        derivatives = []
+        for i in range(1, len(filtered_history)):
+            prev_entry = filtered_history[i - 1]
+            curr_entry = filtered_history[i]
+
+            time_diff_hours = (curr_entry.timestamp - prev_entry.timestamp).total_seconds() / 3600.0
+            if time_diff_hours > 0:
+                temp_diff = curr_entry.temperature - prev_entry.temperature
+                derivative = temp_diff / time_diff_hours
+                derivatives.append(derivative)
+
+        if len(derivatives) < 2:
+            return None
+
+        try:
+            return stdev(derivatives)
+        except Exception as err:
+            _LOGGER.debug("Could not calculate variance: %s", err)
+            return None
+
     def _get_trend_description(self, rate: float | None) -> str:
         """Get human-readable temperature trend description.
 
@@ -221,7 +356,7 @@ class HeatingAnalytics:
         target_temp: float,
         needs_heating: bool,
     ) -> tuple[int | None, datetime | None, float]:
-        """Estimate time to reach target temperature.
+        """Estimate time to reach target temperature with variance-based confidence.
 
         Args:
             zone_id: Zone identifier
@@ -234,13 +369,15 @@ class HeatingAnalytics:
             Tuple of (eta_minutes, eta_timestamp, confidence)
             - eta_minutes: Minutes until target reached (None if can't estimate)
             - eta_timestamp: Datetime when target will be reached (None if can't estimate)
-            - confidence: Prediction confidence 0.0-1.0
+            - confidence: Prediction confidence 0.0-1.0 (accounts for sample count and variance)
         """
         # Get appropriate rate based on heating state
         if needs_heating:
             rate = self.smoothed_rates.get(zone_id, {}).get(room_id, {}).get("heating_rate")
+            heating_filter = True
         else:
             rate = self.smoothed_rates.get(zone_id, {}).get(room_id, {}).get("cooling_rate")
+            heating_filter = False
 
         if rate is None or abs(rate) < 0.05:
             # No rate data or rate too small to be useful
@@ -263,20 +400,43 @@ class HeatingAnalytics:
         now = dt_util.now()
         eta_timestamp = now + timedelta(minutes=time_minutes)
 
-        # Calculate confidence based on sample count
+        # Calculate base confidence from sample count
         history_count = len(self.temp_history.get(zone_id, {}).get(room_id, []))
         if history_count < self.min_samples:
-            confidence = 0.0
+            base_confidence = 0.0
         elif history_count < 10:
-            confidence = 0.5
+            base_confidence = 0.5
         elif history_count < 20:
-            confidence = 0.75
+            base_confidence = 0.75
         else:
-            confidence = 0.9
+            base_confidence = 0.9
+
+        # Calculate variance factor (more variance = less confidence)
+        variance = self._calculate_rate_variance(zone_id, room_id, heating_filter)
+        if variance is not None and abs(rate) > 0:
+            # Coefficient of variation: std_dev / mean
+            # Higher CV = more variability = lower confidence
+            cv = abs(variance / rate)
+            if cv < 0.2:  # Very stable
+                variance_factor = 1.0
+            elif cv < 0.5:  # Moderately stable
+                variance_factor = 0.9
+            elif cv < 1.0:  # Some variability
+                variance_factor = 0.7
+            else:  # High variability
+                variance_factor = 0.5
+        else:
+            variance_factor = 0.8  # Default moderate confidence if can't calculate
+
+        # Combine factors
+        confidence = base_confidence * variance_factor
 
         # Reduce confidence for very long predictions (>2 hours)
         if time_hours > 2:
             confidence *= 0.7
+
+        # Ensure confidence is in valid range
+        confidence = max(0.0, min(1.0, confidence))
 
         return time_minutes, eta_timestamp, confidence
 

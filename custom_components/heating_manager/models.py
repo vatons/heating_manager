@@ -58,6 +58,7 @@ class TemperatureHistoryEntry:
     timestamp: datetime
     temperature: float
     needs_heating: bool
+    zone_heating_active: bool = False  # Is the zone's boiler/heat pump actually running
 
     def to_dict(self) -> dict:
         """Convert to dictionary for storage."""
@@ -65,6 +66,7 @@ class TemperatureHistoryEntry:
             "timestamp": self.timestamp.isoformat(),
             "temperature": self.temperature,
             "needs_heating": self.needs_heating,
+            "zone_heating_active": self.zone_heating_active,
         }
 
     @classmethod
@@ -76,4 +78,5 @@ class TemperatureHistoryEntry:
             timestamp=dt_util.parse_datetime(data["timestamp"]),
             temperature=data["temperature"],
             needs_heating=data["needs_heating"],
+            zone_heating_active=data.get("zone_heating_active", False),  # Backwards compatible
         )

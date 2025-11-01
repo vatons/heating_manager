@@ -71,6 +71,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         # Runtime state
         self.away_mode = False
         self.manual_zone_temp: dict[str, dict] = {}  # zone_id -> {temperature, until_next_schedule}
+        self.zone_heating_demand: dict[str, bool] = {}  # Track zone heating demand for analytics
 
         # Initialize manager components
         self.temperature_manager = TemperatureManager(hass)
@@ -225,9 +226,11 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     )
 
                     # Record temperature for analytics (if enabled and temp is valid)
+                    # Use previous zone heating demand state (what the zone was doing since last update)
                     if self.analytics_enabled and room_temp is not None:
+                        zone_heating_active = self.zone_heating_demand.get(zone_id, False)
                         self.heating_analytics.record_temperature(
-                            zone_id, room_id, room_temp, needs_heating, current_time
+                            zone_id, room_id, room_temp, needs_heating, zone_heating_active, current_time
                         )
 
                         # Get analytics data
@@ -260,10 +263,14 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 zone_demand_mode = zone_config.get(
                     CONF_HEATING_DEMAND_MODE, self.heating_demand_mode
                 )
-                zone_data["heating_demand"] = self.heating_logic.calculate_zone_heating_demand(
+                current_zone_demand = self.heating_logic.calculate_zone_heating_demand(
                     zone_data["rooms"], zone_demand_mode
                 )
+                zone_data["heating_demand"] = current_zone_demand
                 zone_data["heating_demand_mode"] = zone_demand_mode
+
+                # Update zone heating demand for next analytics cycle
+                self.zone_heating_demand[zone_id] = current_zone_demand
 
                 result[zone_id] = zone_data
 
@@ -339,6 +346,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         if data:
             self.away_mode = data.get("away_mode", False)
             self.manual_zone_temp = data.get("manual_zone_temp", {})
+            self.zone_heating_demand = data.get("zone_heating_demand", {})
 
             # Restore boost state (only if not expired)
             stored_boost = data.get("boost_state", {})
@@ -363,6 +371,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             "away_mode": self.away_mode,
             "boost_state": self.boost_manager.get_state_for_storage(),
             "manual_zone_temp": self.manual_zone_temp,
+            "zone_heating_demand": self.zone_heating_demand,
             "room_heating_state": self.heating_logic.get_state_for_storage(),
             "trv_offset_history": self.trv_controller.get_offset_history_for_storage(),
         }
