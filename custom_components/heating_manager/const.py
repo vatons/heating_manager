@@ -41,7 +41,7 @@ CONF_TEMPERATURE = "temperature"
 
 # Defaults
 DEFAULT_UPDATE_INTERVAL = 60 # seconds
-DEFAULT_MINIMUM_TEMP = 15.0 # degrees
+DEFAULT_MINIMUM_TEMP = 7.0  # degrees — used outside active schedule periods (frost protection level)
 DEFAULT_FROST_PROTECTION_TEMP = 7.0 # degrees
 DEFAULT_BOOST_DURATION = 30  # minutes
 DEFAULT_BOOST_TEMP_INCREASE = 2.0  # degrees
