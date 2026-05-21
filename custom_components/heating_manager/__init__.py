@@ -247,11 +247,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["coordinator"] = coordinator
 
-    # Load platforms using discovery
+    # Load platforms using discovery; await so entities exist before async_setup returns.
     for platform in PLATFORMS:
-        hass.async_create_task(
-            async_load_platform(hass, platform, DOMAIN, {}, config)
-        )
+        await async_load_platform(hass, platform, DOMAIN, {}, config)
 
     # Register global services
     async def handle_set_mode(call: ServiceCall) -> None:
