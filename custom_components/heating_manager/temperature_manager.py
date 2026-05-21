@@ -9,8 +9,10 @@ from homeassistant.util import dt as dt_util
 from .const import (
     CONF_ROOMS,
     CONF_SENSORS,
+    DEFAULT_MAX_TEMP_CHANGE_PER_MIN,
     SENSOR_TIMEOUT,
 )
+from .temperature_validator import TemperatureValidator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -22,6 +24,7 @@ class TemperatureManager:
         """Initialize the temperature manager."""
         self.hass = hass
         self.last_sensor_values: dict[str, dict[str, Any]] = {}  # entity_id -> {value, timestamp}
+        self._validator = TemperatureValidator(max_change_per_min=DEFAULT_MAX_TEMP_CHANGE_PER_MIN)
 
     async def get_room_temperature(
         self, zone_id: str, room_id: str, room_config: dict, all_zones: dict
@@ -84,6 +87,24 @@ class TemperatureManager:
             if state and state.state not in ("unknown", "unavailable"):
                 try:
                     temp = float(state.state)
+
+                    # Validate reading is physically plausible
+                    previous_data = self.last_sensor_values.get(temp_sensor_id)
+                    previous_value = previous_data["value"] if previous_data else None
+                    previous_time = previous_data["timestamp"] if previous_data else None
+                    time_delta_seconds = (
+                        (current_time - previous_time).total_seconds()
+                        if previous_time is not None
+                        else None
+                    )
+                    if not self._validator.validate(temp, previous_value, time_delta_seconds):
+                        _LOGGER.warning(
+                            "Sensor %s reading %.1f°C failed validation, skipping",
+                            temp_sensor_id, temp,
+                        )
+                        sensor_info["status"] = "invalid"
+                        sensors_status.append(sensor_info)
+                        continue
 
                     # Determine last_seen timestamp
                     # Priority: 1) last_seen sensor entity, 2) state.last_updated
