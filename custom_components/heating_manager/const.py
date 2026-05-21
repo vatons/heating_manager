@@ -104,7 +104,7 @@ SERVICE_SET_MODE = "set_mode"
 
 # Storage
 STORAGE_KEY = f"{DOMAIN}.storage"
-STORAGE_VERSION = 1
+STORAGE_VERSION = 2  # v2: room_heating_state now nested under {"room_heating_state": ..., "zone_avg_heating_active": ...}
 
 # Update coordinator
 UPDATE_INTERVAL = timedelta(seconds=DEFAULT_UPDATE_INTERVAL)

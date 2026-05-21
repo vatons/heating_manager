@@ -492,11 +492,34 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         await self._save_state()
         await self.async_request_refresh()
 
+    @staticmethod
+    def _migrate_storage_data(data: dict) -> dict:
+        """Migrate storage data from older versions to the current schema.
+
+        v1 -> v2: room_heating_state was stored as a flat dict; v2 wraps it in
+        {"room_heating_state": ..., "zone_avg_heating_active": ...}.
+        HeatingLogic.restore_state handles this transparently, but we record the
+        migration so that _save_state immediately writes the new schema.
+        """
+        stored_version = data.get("version", 1)
+        if stored_version < 2:
+            _LOGGER.info(
+                "Migrating heating manager storage from v%d to v%d",
+                stored_version,
+                STORAGE_VERSION,
+            )
+            # No structural change needed here: HeatingLogic.restore_state already
+            # handles the old flat format via its backward-compat branch.
+            data["version"] = STORAGE_VERSION
+        return data
+
     async def _load_state(self) -> None:
         """Load persistent state from storage."""
         data = await self._store.async_load()
 
         if data:
+            data = self._migrate_storage_data(data)
+
             self.away_mode = data.get("away_mode", False)
             self.manual_zone_temp = data.get("manual_zone_temp", {})
             self.manual_room_temp = data.get("manual_room_temp", {})
@@ -521,6 +544,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
     async def _save_state(self) -> None:
         """Save persistent state to storage."""
         data = {
+            "version": STORAGE_VERSION,
             "away_mode": self.away_mode,
             "boost_state": self.boost_manager.get_state_for_storage(),
             "manual_zone_temp": self.manual_zone_temp,
