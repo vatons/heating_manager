@@ -296,7 +296,7 @@ class TRVController:
         trv_state = self.hass.states.get(trv_id)
         trv_internal_temp = None
 
-        if trv_state and trv_state.attributes.get("current_temperature"):
+        if trv_state and trv_state.attributes.get("current_temperature") is not None:
             try:
                 trv_internal_temp = float(
                     trv_state.attributes["current_temperature"]
