@@ -127,6 +127,13 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             result = {}
 
             for zone_id, zone_config in zones.items():
+                if not isinstance(zone_config, dict):
+                    _LOGGER.error(
+                        "Zone '%s' config must be a mapping, got %s — skipping",
+                        zone_id, type(zone_config).__name__,
+                    )
+                    continue
+
                 zone_data = {
                     "rooms": {},
                     "schedule": zone_config.get(CONF_SCHEDULE, {}),
@@ -135,8 +142,22 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 }
 
                 rooms = zone_config.get(CONF_ROOMS, {})
+                if not isinstance(rooms, dict):
+                    _LOGGER.error(
+                        "Zone '%s': 'rooms' must be a mapping, got %s — skipping zone",
+                        zone_id, type(rooms).__name__,
+                    )
+                    result[zone_id] = zone_data
+                    continue
 
                 for room_id, room_config in rooms.items():
+                    if not isinstance(room_config, dict):
+                        _LOGGER.error(
+                            "Zone '%s', room '%s' config must be a mapping, got %s — skipping",
+                            zone_id, room_id, type(room_config).__name__,
+                        )
+                        continue
+
                     # Get room temperature from sensors with metadata
                     room_temp, temp_metadata = await self.temperature_manager.get_room_temperature(
                         zone_id, room_id, room_config, zones
