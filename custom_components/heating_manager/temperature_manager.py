@@ -197,9 +197,15 @@ class TemperatureManager:
     async def get_zone_average_temperature(
         self, zone_id: str, all_zones: dict
     ) -> float | None:
-        """Calculate the average temperature for all rooms in a zone."""
+        """Calculate the average temperature for all rooms in a zone.
+
+        Only includes sensor readings that are within SENSOR_TIMEOUT so that
+        stale cached state values do not corrupt the zone average used as a
+        fallback for rooms without sensors.
+        """
         zone_config = all_zones.get(zone_id, {})
         rooms = zone_config.get(CONF_ROOMS, {})
+        current_time = dt_util.now()
 
         temps = []
         for room_id, room_config in rooms.items():
@@ -219,13 +225,19 @@ class TemperatureManager:
                 state = self.hass.states.get(temp_sensor_id)
                 if state and state.state not in ("unknown", "unavailable"):
                     try:
-                        temps.append(float(state.state))
+                        temp = float(state.state)
+                        if current_time - state.last_updated < SENSOR_TIMEOUT:
+                            temps.append(temp)
                     except (ValueError, TypeError):
                         pass
 
         if temps:
             return sum(temps) / len(temps)
 
+        _LOGGER.warning(
+            "Zone %s: no sensors with fresh readings available for zone average fallback",
+            zone_id,
+        )
         return None
 
     def get_sensor_entity_ids(self, room_config: dict) -> list[str]:
