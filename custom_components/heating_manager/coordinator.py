@@ -16,6 +16,7 @@ from .const import (
     DEFAULT_HEATING_DEMAND_MODE,
     DEFAULT_MAX_HEATING_DURATION,
     DOMAIN,
+    MAX_BOOST_TEMP,
     STORAGE_KEY,
     STORAGE_VERSION,
 )
@@ -232,6 +233,8 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     if temperature_offset != 0.0:
                         original_target = target_temp
                         target_temp = target_temp + temperature_offset
+                        # Clamp: never below frost_protection_temp, never above MAX_BOOST_TEMP
+                        target_temp = max(self.frost_protection_temp, min(target_temp, MAX_BOOST_TEMP))
                         _LOGGER.debug(
                             "Zone %s / Room %s: Applied temperature offset %.1f°C (%.1f°C -> %.1f°C)",
                             zone_id,
