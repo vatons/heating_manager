@@ -537,75 +537,9 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
             "manual_override": zone_data.get("manual_zone_override", {"active": False, "temperature": None}),
         }
 
-        # Add schedule information
-        from homeassistant.util import dt as dt_util
-        current_time = dt_util.now()
-        zone_config = self.coordinator.config.get("zones", {}).get(self._zone_id, {})
-
-        # Get current scheduled temperature
-        scheduled_temp = self.coordinator.schedule_manager.get_scheduled_temperature(zone_config, current_time)
-
-        # Find current and next schedule period
-        current_period = None
-        next_period = None
-
-        schedule = zone_config.get("schedule", {})
-        is_weekend = current_time.weekday() in [5, 6]
-        schedule_key = "weekend" if is_weekend else "weekday"
-        day_schedule = schedule.get(schedule_key, [])
-        current_time_str = current_time.strftime("%H:%M")
-
-        for period in day_schedule:
-            start = period.get("start")
-            end = period.get("end")
-            if self.coordinator.schedule_manager.is_time_in_period(start, end, current_time_str):
-                current_period = {
-                    "start": start,
-                    "end": end,
-                    "temperature": period.get("temperature"),
-                }
-                break
-
-        # Find next period today: a period whose start is strictly after the
-        # current time in HH:MM string order (works for all non-midnight-spanning
-        # starts). Periods that start before midnight and end after midnight (i.e.
-        # start > end) whose start is in the future are also caught correctly.
-        for period in day_schedule:
-            start = period.get("start")
-            end = period.get("end")
-            if not start:
-                continue
-            # Skip this period if it is currently active (already captured above)
-            if self.coordinator.schedule_manager.is_time_in_period(start, end, current_time_str):
-                continue
-            if start > current_time_str:
-                next_period = {
-                    "start": start,
-                    "end": end,
-                    "temperature": period.get("temperature"),
-                }
-                break
-
-        # If no next period found today, get first period of tomorrow
-        if not next_period and day_schedule:
-            tomorrow_weekday = (current_time.weekday() + 1) % 7
-            tomorrow_is_weekend = tomorrow_weekday in [5, 6]
-            tomorrow_schedule_key = "weekend" if tomorrow_is_weekend else "weekday"
-            tomorrow_schedule = schedule.get(tomorrow_schedule_key, [])
-            if tomorrow_schedule:
-                first_period = tomorrow_schedule[0]
-                next_period = {
-                    "start": first_period.get("start"),
-                    "end": first_period.get("end"),
-                    "temperature": first_period.get("temperature"),
-                    "tomorrow": True,
-                }
-
-        attrs["schedule"] = {
-            "current_temperature": scheduled_temp,
-            "current_period": current_period,
-            "next_period": next_period,
-        }
+        # Schedule info is pre-computed by the coordinator update cycle;
+        # reading it here avoids recomputing on every HA state query.
+        attrs["schedule"] = zone_data.get("schedule_info", {})
 
         # Add aggregated TRV offset summary for zone monitoring
         zone_trv_summary = []

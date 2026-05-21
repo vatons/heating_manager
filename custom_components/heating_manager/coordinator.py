@@ -346,6 +346,53 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     "temperature": self.manual_zone_temp.get(zone_id, {}).get("temperature"),
                 }
 
+                # Pre-compute schedule period info once per update so
+                # ZoneClimate.extra_state_attributes can read cached data
+                # rather than recomputing on every HA state query.
+                zone_schedule = zone_config.get(CONF_SCHEDULE, {})
+                _is_weekend = current_time.weekday() in [5, 6]
+                _day_key = "weekend" if _is_weekend else "weekday"
+                _day_schedule = zone_schedule.get(_day_key, [])
+                _time_str = current_time.strftime("%H:%M")
+                _current_period = None
+                _next_period = None
+                for _period in _day_schedule:
+                    _start, _end = _period.get("start"), _period.get("end")
+                    if self.schedule_manager.is_time_in_period(_start, _end, _time_str):
+                        _current_period = {
+                            "start": _start, "end": _end,
+                            "temperature": _period.get("temperature"),
+                        }
+                        break
+                for _period in _day_schedule:
+                    _start, _end = _period.get("start"), _period.get("end")
+                    if not _start:
+                        continue
+                    if self.schedule_manager.is_time_in_period(_start, _end, _time_str):
+                        continue
+                    if _start > _time_str:
+                        _next_period = {
+                            "start": _start, "end": _end,
+                            "temperature": _period.get("temperature"),
+                        }
+                        break
+                if not _next_period and _day_schedule:
+                    _tomorrow_key = "weekend" if (current_time.weekday() + 1) % 7 in [5, 6] else "weekday"
+                    _tomorrow = zone_schedule.get(_tomorrow_key, [])
+                    if _tomorrow:
+                        _p = _tomorrow[0]
+                        _next_period = {
+                            "start": _p.get("start"), "end": _p.get("end"),
+                            "temperature": _p.get("temperature"), "tomorrow": True,
+                        }
+                zone_data["schedule_info"] = {
+                    "current_temperature": self.schedule_manager.get_scheduled_temperature(
+                        zone_config, current_time
+                    ),
+                    "current_period": _current_period,
+                    "next_period": _next_period,
+                }
+
                 # Watchdog: track continuous heating demand duration
                 if zone_data["heating_demand"]:
                     if zone_id not in self._zone_heating_start:
