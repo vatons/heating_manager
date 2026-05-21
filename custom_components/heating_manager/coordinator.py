@@ -301,7 +301,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     CONF_HEATING_DEMAND_MODE, self.heating_demand_mode
                 )
                 zone_data["heating_demand"] = self.heating_logic.calculate_zone_heating_demand(
-                    zone_data["rooms"], zone_demand_mode
+                    zone_data["rooms"], zone_demand_mode, zone_id=zone_id
                 )
                 zone_data["heating_demand_mode"] = zone_demand_mode
                 zone_data["manual_zone_override"] = {

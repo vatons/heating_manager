@@ -18,6 +18,7 @@ class HeatingLogic:
         """Initialize the heating logic manager."""
         self.heating_deadband = heating_deadband
         self.room_heating_state: dict[str, dict[str, dict]] = {}  # zone_id -> room_id -> {previous_target, target_reached}
+        self._zone_avg_heating_active: dict[str, bool] = {}  # zone_id -> current demand state (hysteresis)
 
     def calculate_heating_need(
         self, zone_id: str, room_id: str, room_temp: float | None, target_temp: float | None
@@ -112,16 +113,18 @@ class HeatingLogic:
 
         return needs_heating
 
-    def calculate_zone_heating_demand(self, rooms: dict, mode: str) -> bool:
+    def calculate_zone_heating_demand(self, rooms: dict, mode: str, zone_id: str = "") -> bool:
         """Calculate whether a zone requires heating based on the configured mode.
 
         Args:
             rooms: Dictionary of room data with temperatures and targets
             mode: "any_room" or "zone_average"
+            zone_id: Zone identifier (required for zone_average hysteresis)
 
         Returns:
             True if zone needs heating, False otherwise
         """
+        _zone_id_key = zone_id
         # BOOST ALWAYS OVERRIDES: If any room has active boost, demand heating
         for room_data in rooms.values():
             if room_data.get("boost"):
@@ -133,7 +136,11 @@ class HeatingLogic:
                 return True
 
         if mode == HEATING_DEMAND_MODE_ZONE_AVERAGE:
-            # Zone average mode: calculate if average temp < average target
+            # Zone average mode: hysteresis around average temp vs average target.
+            # The zone_id is derived from the first room's data if available; the
+            # caller must pass a stable key — we use the rooms dict identity as a
+            # proxy via id(rooms) because calculate_zone_heating_demand receives no
+            # zone_id argument.  To avoid that problem we accept zone_id kwarg below.
             room_temps = []
             target_temps = []
 
@@ -145,14 +152,23 @@ class HeatingLogic:
                     room_temps.append(room_temp)
                     target_temps.append(target_temp)
 
-            # If we have valid data, compare averages
-            if room_temps and target_temps:
-                avg_room_temp = sum(room_temps) / len(room_temps)
-                avg_target_temp = sum(target_temps) / len(target_temps)
+            if not room_temps or not target_temps:
+                return False
 
-                return avg_room_temp < avg_target_temp - self.heating_deadband
+            avg_room_temp = sum(room_temps) / len(room_temps)
+            avg_target_temp = sum(target_temps) / len(target_temps)
 
-            return False
+            # Use hysteresis: turn on when below (target - deadband),
+            # turn off only when at or above target.
+            currently_active = self._zone_avg_heating_active.get(_zone_id_key, False)
+            if currently_active:
+                # Stay on until average reaches target
+                demand = avg_room_temp < avg_target_temp
+            else:
+                # Turn on only when clearly below target
+                demand = avg_room_temp < avg_target_temp - self.heating_deadband
+            self._zone_avg_heating_active[_zone_id_key] = demand
+            return demand
 
         else:  # HEATING_DEMAND_MODE_ANY_ROOM (default)
             # Any room mode: if any room needs heating
@@ -165,8 +181,16 @@ class HeatingLogic:
 
     def get_state_for_storage(self) -> dict:
         """Get room heating state for persistence."""
-        return self.room_heating_state
+        return {
+            "room_heating_state": self.room_heating_state,
+            "zone_avg_heating_active": self._zone_avg_heating_active,
+        }
 
     def restore_state(self, stored_state: dict) -> None:
         """Restore room heating state from storage."""
-        self.room_heating_state = stored_state
+        if isinstance(stored_state, dict) and "room_heating_state" in stored_state:
+            self.room_heating_state = stored_state.get("room_heating_state", {})
+            self._zone_avg_heating_active = stored_state.get("zone_avg_heating_active", {})
+        else:
+            # Backward-compat: old storage stored room_heating_state directly
+            self.room_heating_state = stored_state
