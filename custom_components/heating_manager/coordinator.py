@@ -32,6 +32,25 @@ from .trv_manager import TRVManager
 _LOGGER = logging.getLogger(__name__)
 
 
+async def _async_migrate_storage(
+    old_major_version: int,
+    old_minor_version: int,
+    old_data: dict,
+) -> dict:
+    """Migrate storage data between HA-level Store versions.
+
+    v1 -> v2: internal room_heating_state format changed from a flat dict
+    to a nested dict. HeatingLogic.restore_state handles the old format
+    transparently, so no structural transformation is required here.
+    """
+    if old_major_version == 1:
+        _LOGGER.info("Migrating heating_manager storage from v1 to v2")
+        return old_data
+    raise NotImplementedError(
+        f"Cannot migrate heating_manager storage from version {old_major_version}"
+    )
+
+
 class HeatingManagerCoordinator(DataUpdateCoordinator):
     """Coordinator to manage heating logic and state."""
 
@@ -70,11 +89,10 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         self.boost_duration = boost_duration
         self.heating_deadband = heating_deadband
         self.heating_demand_mode = config.get(CONF_HEATING_DEMAND_MODE, DEFAULT_HEATING_DEMAND_MODE)
-        # Store is always initialised at HA-level version 1. HA's migration hook
-        # only fires when this value changes, which would require a registered
-        # migration_func. Our internal schema changes are handled entirely by
-        # _migrate_storage_data using the version field inside the data dict.
-        self._store = Store(hass, 1, STORAGE_KEY)
+        self._store = Store(
+            hass, STORAGE_VERSION, STORAGE_KEY,
+            migration_func=_async_migrate_storage,
+        )
 
         # Runtime state
         self.away_mode = False
