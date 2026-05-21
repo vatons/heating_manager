@@ -45,6 +45,7 @@ DEFAULT_MINIMUM_TEMP = 15.0 # degrees
 DEFAULT_FROST_PROTECTION_TEMP = 7.0 # degrees
 DEFAULT_BOOST_DURATION = 30  # minutes
 DEFAULT_BOOST_TEMP_INCREASE = 2.0  # degrees
+MAX_BOOST_TEMP = 30.0              # Maximum allowed boost target temperature (°C)
 DEFAULT_SENSOR_TIMEOUT = 30  # minutes
 DEFAULT_FALLBACK_MODE = "zone_average"
 DEFAULT_HEATING_DEMAND_MODE = "any_room"

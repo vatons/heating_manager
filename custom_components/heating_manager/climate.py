@@ -23,6 +23,7 @@ from .const import (
     ATTR_BOOST_DURATION,
     ATTR_BOOST_TEMP,
     DOMAIN,
+    MAX_BOOST_TEMP,
     SERVICE_CLEAR_BOOST,
     SERVICE_SET_BOOST,
 )
@@ -63,7 +64,9 @@ async def async_setup_platform(
         SERVICE_SET_BOOST,
         {
             vol.Optional(ATTR_BOOST_DURATION): cv.positive_int,
-            vol.Optional(ATTR_BOOST_TEMP): vol.Coerce(float),
+            vol.Optional(ATTR_BOOST_TEMP): vol.All(
+                vol.Coerce(float), vol.Range(min=5.0, max=MAX_BOOST_TEMP)
+            ),
         },
         "async_set_boost_service",
     )

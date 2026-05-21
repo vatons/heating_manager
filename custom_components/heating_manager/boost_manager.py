@@ -10,6 +10,7 @@ from .const import (
     CONF_SENSORS,
     CONF_ZONES,
     DEFAULT_BOOST_TEMP_INCREASE,
+    MAX_BOOST_TEMP,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -119,6 +120,13 @@ class BoostManager:
                 "Boost temperature calculated from current room temp: %.1f°C + %.1f°C = %.1f°C",
                 room_temp, DEFAULT_BOOST_TEMP_INCREASE, temperature
             )
+
+        if temperature > MAX_BOOST_TEMP:
+            _LOGGER.warning(
+                "Boost temperature %.1f°C for %s/%s exceeds maximum (%.1f°C), clamping",
+                temperature, zone_id, room_id, MAX_BOOST_TEMP,
+            )
+            temperature = MAX_BOOST_TEMP
 
         # Store boost state
         if zone_id not in self.boost_state:
