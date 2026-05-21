@@ -72,6 +72,15 @@ CONF_MAX_HEATING_DURATION = "max_heating_duration"
 MINIMAL_DEADBAND = 0.1  # °C - for responsive heating
 TARGET_REACHED_THRESHOLD = 0.1  # °C - when target is considered "reached"
 
+# TRV setpoint calculation constants
+TRV_MIN_SETPOINT = 5.0           # °C — absolute floor for any TRV command
+TRV_MAINTAIN_BOOST = 0.5         # °C — added above target when room is at temperature
+TRV_DEFICIT_LARGE_THRESHOLD = 3.0   # °C — deficit above which maximum boost is applied
+TRV_DEFICIT_MEDIUM_THRESHOLD = 1.5  # °C — deficit above which proportional boost is applied
+TRV_DEFICIT_SMALL_THRESHOLD = 0.5   # °C — deficit above which moderate boost is applied
+TRV_PROPORTIONAL_BOOST_FACTOR = 1.5 # multiplier applied to deficit for medium-deficit boost
+TRV_SMALL_DEFICIT_BOOST = 1.5    # °C — fixed boost for small-deficit band
+
 # Temperature validation
 MIN_VALID_TEMP = -20.0  # °C - minimum plausible temperature
 MAX_VALID_TEMP = 50.0   # °C - maximum plausible temperature

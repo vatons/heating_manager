@@ -5,7 +5,16 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
-from .const import DEFAULT_TRV_DEFAULT_OFFSET
+from .const import (
+    DEFAULT_TRV_DEFAULT_OFFSET,
+    TRV_DEFICIT_LARGE_THRESHOLD,
+    TRV_DEFICIT_MEDIUM_THRESHOLD,
+    TRV_DEFICIT_SMALL_THRESHOLD,
+    TRV_MAINTAIN_BOOST,
+    TRV_MIN_SETPOINT,
+    TRV_PROPORTIONAL_BOOST_FACTOR,
+    TRV_SMALL_DEFICIT_BOOST,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -108,45 +117,42 @@ class TRVController:
             _LOGGER.debug(
                 "Room overshooting target, setting TRV low to cool: %.1f°C", setpoint
             )
-            return max(setpoint, 5.0)  # Never go below 5°C for safety
-
-        _MIN_TRV_SETPOINT = 5.0  # Never command a TRV below this temperature
+            return max(setpoint, TRV_MIN_SETPOINT)
 
         # Room at target - maintain with small boost
         if not needs_heating:
-            maintain_boost = 0.5
-            setpoint = target_temp + ema_offset + maintain_boost
+            setpoint = target_temp + ema_offset + TRV_MAINTAIN_BOOST
             _LOGGER.debug(
                 "Room at target, maintaining: target=%.1f°C + offset=%.1f°C + boost=%.1f°C = %.1f°C",
-                target_temp, ema_offset, maintain_boost, setpoint
+                target_temp, ema_offset, TRV_MAINTAIN_BOOST, setpoint
             )
-            return max(_MIN_TRV_SETPOINT, min(setpoint, self.max_absolute_setpoint))
+            return max(TRV_MIN_SETPOINT, min(setpoint, self.max_absolute_setpoint))
 
         # Room needs heating - calculate adaptive boost
         deficit = target_temp - room_temp
 
-        if deficit > 3.0:
+        if deficit > TRV_DEFICIT_LARGE_THRESHOLD:
             # Large deficit - maximum boost for rapid heating
             boost = self.max_boost
             reason = "large deficit"
-        elif deficit > 1.5:
+        elif deficit > TRV_DEFICIT_MEDIUM_THRESHOLD:
             # Medium deficit - proportional boost
-            boost = min(deficit * 1.5, self.max_boost)
+            boost = min(deficit * TRV_PROPORTIONAL_BOOST_FACTOR, self.max_boost)
             reason = "medium deficit (proportional)"
-        elif deficit > 0.5:
+        elif deficit > TRV_DEFICIT_SMALL_THRESHOLD:
             # Small deficit - moderate boost
-            boost = 1.5
+            boost = TRV_SMALL_DEFICIT_BOOST
             reason = "small deficit"
         else:
             # Tiny deficit - minimal boost
-            boost = 0.5
+            boost = TRV_MAINTAIN_BOOST
             reason = "tiny deficit"
 
         # Calculate final setpoint using EMA offset (already smoothed)
         setpoint = target_temp + ema_offset + boost
 
-        # Apply safety bounds: never below 5°C, never above max_absolute_setpoint
-        setpoint = max(_MIN_TRV_SETPOINT, min(setpoint, self.max_absolute_setpoint))
+        # Apply safety bounds
+        setpoint = max(TRV_MIN_SETPOINT, min(setpoint, self.max_absolute_setpoint))
 
         _LOGGER.debug(
             "Calculating TRV setpoint (%s): "
