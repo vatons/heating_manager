@@ -560,13 +560,22 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
                 }
                 break
 
-        # Find next period (can wrap to next day)
+        # Find next period today: a period whose start is strictly after the
+        # current time in HH:MM string order (works for all non-midnight-spanning
+        # starts). Periods that start before midnight and end after midnight (i.e.
+        # start > end) whose start is in the future are also caught correctly.
         for period in day_schedule:
             start = period.get("start")
-            if start and start > current_time_str:
+            end = period.get("end")
+            if not start:
+                continue
+            # Skip this period if it is currently active (already captured above)
+            if self.coordinator.schedule_manager.is_time_in_period(start, end, current_time_str):
+                continue
+            if start > current_time_str:
                 next_period = {
                     "start": start,
-                    "end": period.get("end"),
+                    "end": end,
                     "temperature": period.get("temperature"),
                 }
                 break
