@@ -25,27 +25,31 @@ class BoostManager:
         self.boost_duration = boost_duration
         self.boost_state: dict[str, dict[str, dict]] = {}  # zone_id -> room_id -> boost_info
 
-    def get_boost_info(
-        self, zone_id: str, room_id: str, current_time: datetime
-    ) -> dict | None:
-        """Get boost information if active."""
+    def _expire_boost_if_needed(self, zone_id: str, room_id: str, current_time: datetime) -> None:
+        """Remove a boost entry if it has expired. Called before any read."""
         if zone_id not in self.boost_state:
-            return None
-
+            return
         if room_id not in self.boost_state[zone_id]:
-            return None
-
-        boost = self.boost_state[zone_id][room_id]
-
-        # Check if boost has expired
-        if current_time > boost["end_time"]:
-            # Remove expired boost
+            return
+        if current_time > self.boost_state[zone_id][room_id]["end_time"]:
             del self.boost_state[zone_id][room_id]
             if not self.boost_state[zone_id]:
                 del self.boost_state[zone_id]
-            return None
 
-        return boost
+    def get_boost_info(
+        self, zone_id: str, room_id: str, current_time: datetime
+    ) -> dict | None:
+        """Return active boost information, or None if expired or not set.
+
+        Expired boosts are removed as part of this call so that stale entries
+        do not accumulate. This side-effect is intentional and documented; the
+        underlying cleanup logic is isolated in _expire_boost_if_needed.
+        """
+        self._expire_boost_if_needed(zone_id, room_id, current_time)
+
+        return (
+            self.boost_state.get(zone_id, {}).get(room_id)
+        )
 
     async def set_boost(
         self,
