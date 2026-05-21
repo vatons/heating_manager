@@ -1,6 +1,7 @@
 """Data coordinator for Heating Manager."""
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
+from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
@@ -13,6 +14,7 @@ from .const import (
     CONF_SCHEDULE,
     CONF_TEMPERATURE_OFFSET,
     DEFAULT_HEATING_DEMAND_MODE,
+    DEFAULT_MAX_HEATING_DURATION,
     DOMAIN,
     STORAGE_KEY,
     STORAGE_VERSION,
@@ -73,6 +75,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         self.manual_zone_temp: dict[str, dict] = {}  # zone_id -> {temperature, last_scheduled_temp}
         self.manual_room_temp: dict[str, dict[str, dict]] = {}  # zone_id -> room_id -> {temperature, last_scheduled_temp}
         self._loaded_state = False
+        self._zone_heating_start: dict[str, Any] = {}  # zone_id -> datetime when demand started
 
         # Initialize manager components
         self.temperature_manager = TemperatureManager(hass)
@@ -305,6 +308,40 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     "active": zone_id in self.manual_zone_temp,
                     "temperature": self.manual_zone_temp.get(zone_id, {}).get("temperature"),
                 }
+
+                # Watchdog: track continuous heating demand duration
+                if zone_data["heating_demand"]:
+                    if zone_id not in self._zone_heating_start:
+                        self._zone_heating_start[zone_id] = current_time
+                    else:
+                        duration_minutes = (
+                            current_time - self._zone_heating_start[zone_id]
+                        ).total_seconds() / 60
+                        if duration_minutes > DEFAULT_MAX_HEATING_DURATION:
+                            _LOGGER.critical(
+                                "Zone %s has been demanding heat for %.0f minutes "
+                                "(threshold: %d min). Possible sensor failure, stuck boost, "
+                                "or unreachable target temperature. Setting all zone TRVs to "
+                                "minimum temperature as a safety measure.",
+                                zone_id,
+                                duration_minutes,
+                                DEFAULT_MAX_HEATING_DURATION,
+                            )
+                            for room_id, room_data in zone_data["rooms"].items():
+                                for trv_id in room_data.get("trvs", []):
+                                    await self.hass.services.async_call(
+                                        "climate",
+                                        "set_temperature",
+                                        {
+                                            "entity_id": trv_id,
+                                            "temperature": self.minimum_temp,
+                                        },
+                                        blocking=False,
+                                    )
+                            # Reset timer so the warning fires again after another full period
+                            self._zone_heating_start[zone_id] = current_time
+                else:
+                    self._zone_heating_start.pop(zone_id, None)
 
                 result[zone_id] = zone_data
 

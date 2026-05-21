@@ -63,6 +63,10 @@ DEFAULT_ANALYTICS_MIN_SAMPLES = 3    # Need at least 3 samples for derivative
 DEFAULT_DERIVATIVE_SMOOTHING = 0.3   # EMA smoothing factor for derivatives
 DEFAULT_MAX_TEMP_CHANGE_PER_MIN = 0.5  # Max plausible °C/min change
 
+# Safety limits
+DEFAULT_MAX_HEATING_DURATION = 240  # minutes — log critical warning if zone heats longer
+CONF_MAX_HEATING_DURATION = "max_heating_duration"
+
 # Heating logic constants
 MINIMAL_DEADBAND = 0.1  # °C - for responsive heating
 TARGET_REACHED_THRESHOLD = 0.1  # °C - when target is considered "reached"
