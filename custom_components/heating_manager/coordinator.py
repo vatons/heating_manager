@@ -97,7 +97,6 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         self.trv_manager = TRVManager(self.trv_controller)
 
         # Initialize heating analytics
-        self.analytics_enabled = analytics_enabled
         if analytics_enabled:
             self.heating_analytics = HeatingAnalytics(
                 history_size=analytics_history_size,
@@ -270,7 +269,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     )
 
                     # Record temperature for analytics (if enabled and temp is valid)
-                    if self.analytics_enabled and room_temp is not None:
+                    if self.heating_analytics is not None and room_temp is not None:
                         self.heating_analytics.record_temperature(
                             zone_id, room_id, room_temp, needs_heating, current_time
                         )
@@ -555,7 +554,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             self.trv_controller.restore_offset_history(trv_offset_history)
 
             # Restore analytics history (if analytics enabled)
-            if self.analytics_enabled and self.heating_analytics:
+            if self.heating_analytics is not None:
                 analytics_history = data.get("analytics_history", {})
                 self.heating_analytics.restore_history(analytics_history)
 
@@ -572,7 +571,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         }
 
         # Add analytics history if enabled
-        if self.analytics_enabled and self.heating_analytics:
+        if self.heating_analytics is not None:
             data["analytics_history"] = self.heating_analytics.get_history_for_storage()
 
         await self._store.async_save(data)
