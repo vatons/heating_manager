@@ -275,7 +275,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
-    hass.services.async_remove(DOMAIN, SERVICE_SET_MODE)
-    hass.data.pop(DOMAIN, None)
+    """Unload a config entry.
+
+    This integration is configured via YAML (async_setup), not config entries.
+    async_unload_entry should not be reached in normal operation; guard against
+    it destroying the YAML-managed coordinator and services.
+    """
+    _LOGGER.warning(
+        "async_unload_entry called for %s, but this integration uses YAML setup. "
+        "Skipping teardown to avoid disrupting the running heating manager.",
+        DOMAIN,
+    )
     return True
