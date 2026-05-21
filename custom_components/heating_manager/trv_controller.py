@@ -106,6 +106,8 @@ class TRVController:
             )
             return max(setpoint, 5.0)  # Never go below 5°C for safety
 
+        _MIN_TRV_SETPOINT = 5.0  # Never command a TRV below this temperature
+
         # Room at target - maintain with small boost
         if not needs_heating:
             maintain_boost = 0.5
@@ -114,7 +116,7 @@ class TRVController:
                 "Room at target, maintaining: target=%.1f°C + offset=%.1f°C + boost=%.1f°C = %.1f°C",
                 target_temp, ema_offset, maintain_boost, setpoint
             )
-            return min(setpoint, self.max_absolute_setpoint)
+            return max(_MIN_TRV_SETPOINT, min(setpoint, self.max_absolute_setpoint))
 
         # Room needs heating - calculate adaptive boost
         deficit = target_temp - room_temp
@@ -139,8 +141,8 @@ class TRVController:
         # Calculate final setpoint using EMA offset (already smoothed)
         setpoint = target_temp + ema_offset + boost
 
-        # Apply safety cap
-        setpoint = min(setpoint, self.max_absolute_setpoint)
+        # Apply safety bounds: never below 5°C, never above max_absolute_setpoint
+        setpoint = max(_MIN_TRV_SETPOINT, min(setpoint, self.max_absolute_setpoint))
 
         _LOGGER.debug(
             "Calculating TRV setpoint (%s): "
