@@ -113,13 +113,13 @@ class HeatingLogic:
 
         return needs_heating
 
-    def calculate_zone_heating_demand(self, rooms: dict, mode: str, zone_id: str = "") -> bool:
+    def calculate_zone_heating_demand(self, rooms: dict, mode: str, zone_id: str) -> bool:
         """Calculate whether a zone requires heating based on the configured mode.
 
         Args:
             rooms: Dictionary of room data with temperatures and targets
             mode: "any_room" or "zone_average"
-            zone_id: Zone identifier (required for zone_average hysteresis)
+            zone_id: Zone identifier (used to key per-zone hysteresis state)
 
         Returns:
             True if zone needs heating, False otherwise
@@ -136,11 +136,7 @@ class HeatingLogic:
                 return True
 
         if mode == HEATING_DEMAND_MODE_ZONE_AVERAGE:
-            # Zone average mode: hysteresis around average temp vs average target.
-            # The zone_id is derived from the first room's data if available; the
-            # caller must pass a stable key — we use the rooms dict identity as a
-            # proxy via id(rooms) because calculate_zone_heating_demand receives no
-            # zone_id argument.  To avoid that problem we accept zone_id kwarg below.
+            # Zone average mode: hysteresis keyed by zone_id.
             room_temps = []
             target_temps = []
 
