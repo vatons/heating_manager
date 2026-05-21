@@ -405,12 +405,18 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                             _LOGGER.critical(
                                 "Zone %s has been demanding heat for %.0f minutes "
                                 "(threshold: %d min). Possible sensor failure, stuck boost, "
-                                "or unreachable target temperature. Setting all zone TRVs to "
-                                "minimum temperature as a safety measure.",
+                                "or unreachable target temperature. Clearing overrides and "
+                                "setting all zone TRVs to minimum temperature.",
                                 zone_id,
                                 duration_minutes,
                                 DEFAULT_MAX_HEATING_DURATION,
                             )
+                            # Clear boost and manual overrides so the next update cycle
+                            # does not immediately re-apply the high setpoints that
+                            # caused or sustained the watchdog condition.
+                            self.boost_manager.boost_state.pop(zone_id, None)
+                            self.manual_room_temp.pop(zone_id, None)
+                            self.manual_zone_temp.pop(zone_id, None)
                             for room_id, room_data in zone_data["rooms"].items():
                                 for trv_id in room_data.get("trvs", []):
                                     await self.hass.services.async_call(
@@ -422,7 +428,9 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                                         },
                                         blocking=True,
                                     )
-                            # Reset timer so the warning fires again after another full period
+                            # Persist cleared state immediately
+                            await self._save_state()
+                            # Reset timer so the safeguard repeats if condition persists
                             self._zone_heating_start[zone_id] = current_time
                 else:
                     self._zone_heating_start.pop(zone_id, None)
