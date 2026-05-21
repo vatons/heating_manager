@@ -311,7 +311,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             return result
 
         except Exception as err:
-            _LOGGER.error("Error updating heating manager data: %s", err)
+            _LOGGER.exception("Error updating heating manager data: %s", err)
             raise UpdateFailed(f"Error updating data: {err}")
 
     async def set_boost(
