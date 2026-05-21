@@ -109,10 +109,11 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict:
         """Fetch data from sensors and update heating logic."""
         try:
-            # Load persistent state on first run
+            # Load persistent state on first run; flag is set before the await
+            # so a concurrent refresh cannot enter _load_state() a second time.
             if not self._loaded_state:
-                await self._load_state()
                 self._loaded_state = True
+                await self._load_state()
 
             zones = self.config.get("zones", {})
             current_time = dt_util.now()
