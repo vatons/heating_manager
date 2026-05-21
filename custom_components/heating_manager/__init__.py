@@ -79,7 +79,7 @@ CONFIG_SCHEMA = vol.Schema(
                 ): cv.positive_int,
                 vol.Optional(
                     CONF_HEATING_DEADBAND, default=DEFAULT_HEATING_DEADBAND
-                ): vol.Coerce(float),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=5.0)),
                 vol.Optional(
                     CONF_TRV_OVERSHOOT_ENABLED, default=DEFAULT_TRV_OVERSHOOT_ENABLED
                 ): cv.boolean,
