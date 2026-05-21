@@ -52,6 +52,9 @@ from .coordinator import HeatingManagerCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
+# This integration uses YAML-based discovery (async_load_platform) rather than
+# config entries. PLATFORMS is not used for platform forwarding here; it is
+# retained only for potential future migration to config-entry setup.
 PLATFORMS = [Platform.CLIMATE]
 
 CONFIG_SCHEMA = vol.Schema(
