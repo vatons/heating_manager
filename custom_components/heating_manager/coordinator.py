@@ -235,6 +235,12 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     # Apply room temperature offset if configured
                     temperature_offset = room_config.get(CONF_TEMPERATURE_OFFSET, 0.0)
                     if temperature_offset != 0.0:
+                        if abs(temperature_offset) > 5.0:
+                            _LOGGER.warning(
+                                "Zone %s / Room %s: temperature_offset %.1f°C is unusually large. "
+                                "Check configuration — the result will be clamped to safe bounds.",
+                                zone_id, room_id, temperature_offset,
+                            )
                         original_target = target_temp
                         target_temp = target_temp + temperature_offset
                         # Clamp: never below frost_protection_temp, never above MAX_BOOST_TEMP
