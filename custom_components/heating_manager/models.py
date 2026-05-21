@@ -72,8 +72,19 @@ class TemperatureHistoryEntry:
         """Create from dictionary (for restoration from storage)."""
         from homeassistant.util import dt as dt_util
 
+        timestamp_raw = data.get("timestamp")
+        if not timestamp_raw:
+            raise ValueError(f"Missing 'timestamp' in history entry: {data}")
+        timestamp = dt_util.parse_datetime(timestamp_raw)
+        if timestamp is None:
+            raise ValueError(f"Unparseable 'timestamp' in history entry: {timestamp_raw!r}")
+
+        temperature = data.get("temperature")
+        if temperature is None:
+            raise ValueError(f"Missing 'temperature' in history entry: {data}")
+
         return cls(
-            timestamp=dt_util.parse_datetime(data["timestamp"]),
-            temperature=data["temperature"],
-            needs_heating=data["needs_heating"],
+            timestamp=timestamp,
+            temperature=float(temperature),
+            needs_heating=bool(data.get("needs_heating", False)),
         )
