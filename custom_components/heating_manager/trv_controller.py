@@ -319,7 +319,7 @@ class TRVController:
                 "climate",
                 "set_temperature",
                 {"entity_id": trv_id, "temperature": trv_setpoint},
-                blocking=False,
+                blocking=True,
             )
 
             _LOGGER.info(

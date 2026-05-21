@@ -286,7 +286,7 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
                     "climate",
                     "set_temperature",
                     {"entity_id": trv_id, "temperature": self.coordinator.minimum_temp},
-                    blocking=False,
+                    blocking=True,
                 )
 
         self.async_write_ha_state()

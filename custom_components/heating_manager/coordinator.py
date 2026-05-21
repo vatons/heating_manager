@@ -339,7 +339,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                                             "entity_id": trv_id,
                                             "temperature": self.minimum_temp,
                                         },
-                                        blocking=False,
+                                        blocking=True,
                                     )
                             # Reset timer so the warning fires again after another full period
                             self._zone_heating_start[zone_id] = current_time
