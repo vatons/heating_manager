@@ -71,7 +71,9 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         self.boost_duration = boost_duration
         self.heating_deadband = heating_deadband
         self.heating_demand_mode = config.get(CONF_HEATING_DEMAND_MODE, DEFAULT_HEATING_DEMAND_MODE)
-        self._store = Store(hass, STORAGE_HA_VERSION, STORAGE_KEY)
+        # Use Store without version parameter to avoid HA's migration system.
+        # We handle our own internal schema versioning via _migrate_storage_data.
+        self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
 
         # Runtime state
         self.away_mode = False

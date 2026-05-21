@@ -113,13 +113,7 @@ SERVICE_SET_MODE = "set_mode"
 
 # Storage
 STORAGE_KEY = f"{DOMAIN}.storage"
-# STORAGE_HA_VERSION is the version passed to HA's Store constructor.
-# Only increment this when the *serialisation format* changes in a way HA
-# must orchestrate (requires registering migration_func on Store).
-# Our internal data schema version is tracked separately by STORAGE_VERSION
-# and handled entirely within _migrate_storage_data.
-STORAGE_HA_VERSION = 1
-STORAGE_VERSION = 2  # internal schema: v2 wraps room_heating_state in a nested dict
+STORAGE_VERSION = 2  # v2: room_heating_state now nested under {"room_heating_state": ..., "zone_avg_heating_active": ...}
 
 # Update coordinator
 UPDATE_INTERVAL = timedelta(seconds=DEFAULT_UPDATE_INTERVAL)
