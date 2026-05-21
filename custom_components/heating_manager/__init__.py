@@ -67,10 +67,10 @@ CONFIG_SCHEMA = vol.Schema(
                 ): cv.positive_int,
                 vol.Optional(
                     CONF_MINIMUM_TEMP, default=DEFAULT_MINIMUM_TEMP
-                ): vol.Coerce(float),
+                ): vol.All(vol.Coerce(float), vol.Range(min=5.0, max=30.0)),
                 vol.Optional(
                     CONF_FROST_PROTECTION_TEMP, default=DEFAULT_FROST_PROTECTION_TEMP
-                ): vol.Coerce(float),
+                ): vol.All(vol.Coerce(float), vol.Range(min=1.0, max=15.0)),
                 vol.Optional(
                     CONF_FALLBACK_MODE, default=DEFAULT_FALLBACK_MODE
                 ): cv.string,
