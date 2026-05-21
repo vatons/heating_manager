@@ -100,9 +100,7 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         self._room_config = room_config
         self._attr_name = f"{room_config.get('name', room_id)} (HM)"
         self._attr_unique_id = f"{DOMAIN}_{zone_id}_{room_id}"
-        self._attr_entity_id = f"climate.{room_id}_hm"
         self._hvac_mode = HVACMode.HEAT
-        self._preset_mode = "schedule"
 
     @property
     def current_temperature(self) -> float | None:
@@ -211,6 +209,9 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
                 "time_remaining_minutes": self._calculate_time_remaining(boost) if boost else None,
             },
 
+            # Manual override information
+            "manual_override": room_data.get("manual_room_override", {"active": False, "temperature": None}),
+
             # Sensor information
             "sensors": room_data.get("sensors_status", []),
         }
@@ -271,7 +272,7 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         """Set new HVAC mode."""
         self._hvac_mode = hvac_mode
 
-        if hvac_mode == HVACMode.OFF:
+        if hvac_mode == HVACMode.OFF and self.coordinator.data:
             # Set all TRVs in this room to minimum temperature
             zone_data = self.coordinator.data.get(self._zone_id, {})
             rooms = zone_data.get("rooms", {})
@@ -289,50 +290,67 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         await self.coordinator.async_request_refresh()
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
-        """Set new target temperature - triggers a boost if higher than scheduled temp."""
+        """Set new target temperature.
+
+        Behaviour depends on whether boost is active:
+
+        With boost active:
+          - temp == schedule  → clear boost + manual override (revert to schedule)
+          - temp < schedule   → clear boost, set manual override at lower temp
+          - temp > schedule   → keep boost but update its target temperature
+
+        Without boost:
+          - temp == schedule  → clear manual override (revert to schedule)
+          - any other temp    → set manual override
+        """
         temperature = kwargs.get(ATTR_TEMPERATURE)
         if temperature is None:
             return
 
-        # Get the current scheduled temperature
         from homeassistant.util import dt as dt_util
         current_time = dt_util.now()
         zone_config = self.coordinator.config.get("zones", {}).get(self._zone_id, {})
         scheduled_temp = self.coordinator.schedule_manager.get_scheduled_temperature(zone_config, current_time)
 
-        # Only trigger boost if the requested temperature is higher than scheduled
-        if temperature > scheduled_temp:
-            await self.coordinator.set_boost(
-                self._zone_id,
-                self._room_id,
-                temperature=temperature
-            )
-        else:
-            # If temperature is lower or equal to scheduled, clear any active boost
-            await self.coordinator.clear_boost(self._zone_id, self._room_id)
+        # Check boost_manager directly — it's updated synchronously before the
+        # coordinator refresh, so coordinator.data may still reflect the old state.
+        boost_info = self.coordinator.boost_manager.get_boost_info(
+            self._zone_id, self._room_id, current_time
+        )
 
-        self.async_write_ha_state()
+        if boost_info:
+            if temperature == scheduled_temp:
+                await self.coordinator.clear_boost(self._zone_id, self._room_id)
+                await self.coordinator.clear_manual_room_temperature(self._zone_id, self._room_id)
+            elif temperature < scheduled_temp:
+                await self.coordinator.clear_boost(self._zone_id, self._room_id)
+                await self.coordinator.set_manual_room_temperature(self._zone_id, self._room_id, temperature)
+            else:
+                # Above schedule: keep boost running, just update the temperature
+                await self.coordinator.update_boost_temperature(self._zone_id, self._room_id, temperature)
+            return
+
+        if temperature == scheduled_temp:
+            await self.coordinator.clear_manual_room_temperature(self._zone_id, self._room_id)
+        else:
+            await self.coordinator.set_manual_room_temperature(self._zone_id, self._room_id, temperature)
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set new preset mode."""
         if preset_mode == "away":
             await self.coordinator.set_away_mode(True)
         elif preset_mode == "boost":
-            # Selecting boost preset without a temperature uses the default boost logic
-            # (scheduled temp + boost increase)
             await self.coordinator.set_boost(
                 self._zone_id,
                 self._room_id,
-                temperature=None  # Uses default: current room temp + boost increase
+                temperature=None,  # Uses default: current room temp + boost increase
             )
         elif preset_mode == "schedule":
-            # Clear boost for this room and turn off away mode if active
             if self.coordinator.away_mode:
                 await self.coordinator.set_away_mode(False)
             await self.coordinator.clear_boost(self._zone_id, self._room_id)
-
-        self._preset_mode = preset_mode
-        self.async_write_ha_state()
+            await self.coordinator.clear_manual_room_temperature(self._zone_id, self._room_id)
+        # Coordinator refresh triggered by the above calls will update state
 
     async def async_set_boost_service(
         self, duration: int | None = None, temperature: float | None = None
@@ -341,12 +359,10 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         await self.coordinator.set_boost(
             self._zone_id, self._room_id, duration, temperature
         )
-        self.async_write_ha_state()
 
     async def async_clear_boost_service(self) -> None:
         """Service call to clear boost for this room."""
         await self.coordinator.clear_boost(self._zone_id, self._room_id)
-        self.async_write_ha_state()
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -362,7 +378,7 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
     )
-    _attr_preset_modes = ["schedule", "boost"]
+    _attr_preset_modes = ["schedule", "away", "boost"]
 
     def __init__(
         self,
@@ -377,7 +393,6 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
         self._zone_config = zone_config
         self._attr_name = f"{zone_config.get('name', zone_id)} Zone (HM)"
         self._attr_unique_id = f"{DOMAIN}_{zone_id}_zone"
-        self._attr_entity_id = f"climate.{zone_id}_zone_hm"
 
     @property
     def current_temperature(self) -> float | None:
@@ -458,13 +473,15 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
     @property
     def preset_mode(self) -> str:
         """Return the current preset mode."""
+        if self.coordinator.away_mode:
+            return "away"
+
         if not self.coordinator.data:
             return "schedule"
 
         zone_data = self.coordinator.data.get(self._zone_id, {})
         rooms = zone_data.get("rooms", {})
 
-        # If any room in the zone has an active boost, return "boost"
         for room_data in rooms.values():
             if room_data.get("boost"):
                 return "boost"
@@ -504,6 +521,9 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
                 "active": len(boosted_rooms) > 0,
                 "room_ids": boosted_rooms,
             },
+
+            # Zone-level manual override
+            "manual_override": zone_data.get("manual_zone_override", {"active": False, "temperature": None}),
         }
 
         # Add schedule information
@@ -527,7 +547,7 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
         for period in day_schedule:
             start = period.get("start")
             end = period.get("end")
-            if start and end and start <= current_time_str < end:
+            if self.coordinator.schedule_manager._time_in_range(start, end, current_time_str):
                 current_period = {
                     "start": start,
                     "end": end,
@@ -548,8 +568,9 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
 
         # If no next period found today, get first period of tomorrow
         if not next_period and day_schedule:
-            # Get opposite day schedule (tomorrow)
-            tomorrow_schedule_key = "weekday" if is_weekend else "weekend"
+            tomorrow_weekday = (current_time.weekday() + 1) % 7
+            tomorrow_is_weekend = tomorrow_weekday in [5, 6]
+            tomorrow_schedule_key = "weekend" if tomorrow_is_weekend else "weekday"
             tomorrow_schedule = schedule.get(tomorrow_schedule_key, [])
             if tomorrow_schedule:
                 first_period = tomorrow_schedule[0]
@@ -589,85 +610,49 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
         return attrs
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
-        """Set new target temperature for all rooms in the zone - triggers boost if higher than scheduled."""
+        """Set new target temperature as a manual zone override.
+
+        Clears any per-room manual overrides in the zone (boosts are preserved).
+        Equal to schedule → clear zone manual override, revert to schedule.
+        Any other value → set manual zone override (persists until schedule changes).
+        Boost is only triggered via the boost preset or set_boost service.
+        """
         temperature = kwargs.get(ATTR_TEMPERATURE)
         if temperature is None:
             return
 
-        # Get the current scheduled temperature for this zone
         from homeassistant.util import dt as dt_util
         current_time = dt_util.now()
         zone_config = self.coordinator.config.get("zones", {}).get(self._zone_id, {})
         scheduled_temp = self.coordinator.schedule_manager.get_scheduled_temperature(zone_config, current_time)
-
-        # Get all rooms in this zone
         rooms = zone_config.get("rooms", {})
 
-        # Only trigger boost if the requested temperature is higher than scheduled
-        if temperature > scheduled_temp:
-            # Boost all rooms in the zone that have sensors
-            _LOGGER.info(
-                "Zone %s: Setting boost to %.1f°C for all rooms",
-                self._zone_id,
-                temperature,
-            )
-            for room_id, room_config in rooms.items():
-                if room_config.get("sensors"):  # Only boost rooms with sensors
-                    await self.coordinator.set_boost(
-                        self._zone_id,
-                        room_id,
-                        temperature=temperature
-                    )
+        for room_id in rooms:
+            await self.coordinator.clear_manual_room_temperature(self._zone_id, room_id)
+        if temperature == scheduled_temp:
+            await self.coordinator.clear_manual_zone_temperature(self._zone_id)
         else:
-            # If temperature is lower or equal to scheduled, clear all boosts in this zone
-            _LOGGER.info(
-                "Zone %s: Clearing all boosts (requested temp %.1f°C <= scheduled %.1f°C)",
-                self._zone_id,
-                temperature,
-                scheduled_temp,
-            )
-            for room_id in rooms.keys():
-                await self.coordinator.clear_boost(self._zone_id, room_id)
-
-        self.async_write_ha_state()
+            await self.coordinator.set_manual_zone_temperature(self._zone_id, temperature)
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set new preset mode for the zone."""
-        if preset_mode == "boost":
-            # Boost all rooms in the zone using default boost logic (current temp + boost increase)
+        if preset_mode == "away":
+            await self.coordinator.set_away_mode(True)
+        elif preset_mode == "boost":
             zone_config = self.coordinator.config.get("zones", {}).get(self._zone_id, {})
             rooms = zone_config.get("rooms", {})
-            boosted_count = 0
-
             for room_id, room_config in rooms.items():
-                if room_config.get("sensors"):  # Only boost rooms with sensors
-                    await self.coordinator.set_boost(
-                        self._zone_id,
-                        room_id,
-                        temperature=None  # Uses default: current room temp + boost increase
-                    )
-                    boosted_count += 1
-
-            _LOGGER.info(
-                "Zone %s: Preset 'boost' activated - boosted %d rooms",
-                self._zone_id,
-                boosted_count,
-            )
-            # Refresh coordinator to immediately update all room entities
-            await self.coordinator.async_request_refresh()
+                if room_config.get("sensors"):
+                    await self.coordinator.set_boost(self._zone_id, room_id, temperature=None)
         elif preset_mode == "schedule":
-            # Clear all boosts in this zone
+            if self.coordinator.away_mode:
+                await self.coordinator.set_away_mode(False)
             zone_config = self.coordinator.config.get("zones", {}).get(self._zone_id, {})
             rooms = zone_config.get("rooms", {})
-
-            for room_id in rooms.keys():
+            for room_id in rooms:
                 await self.coordinator.clear_boost(self._zone_id, room_id)
-
-            _LOGGER.info("Zone %s: Preset 'schedule' activated - all boosts cleared", self._zone_id)
-            # Refresh coordinator to immediately update all room entities
-            await self.coordinator.async_request_refresh()
-
-        self.async_write_ha_state()
+                await self.coordinator.clear_manual_room_temperature(self._zone_id, room_id)
+            await self.coordinator.clear_manual_zone_temperature(self._zone_id)
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -694,7 +679,6 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
 
         self._attr_name = "Global (HM)"
         self._attr_unique_id = f"{DOMAIN}_global"
-        self._attr_entity_id = "climate.global_hm"
 
     @property
     def current_temperature(self) -> float | None:
@@ -722,8 +706,13 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
             _LOGGER.debug("Global: No coordinator data available for target temperature")
             return self.coordinator.minimum_temp if self.coordinator else None
 
+        zone_configs = self.coordinator.config.get("zones", {})
         all_targets = []
-        for zone_data in self.coordinator.data.values():
+        for zone_id, zone_data in self.coordinator.data.items():
+            # Skip zones without a schedule — their target is just minimum_temp
+            zone_config = zone_configs.get(zone_id, {})
+            if not zone_config.get("schedule"):
+                continue
             rooms = zone_data.get("rooms", {})
             for room_data in rooms.values():
                 target = room_data.get("target_temperature")
@@ -735,7 +724,7 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
 
         # Fallback: if no targets available, return minimum temp
         _LOGGER.warning(
-            "Global: No target temperatures available for any room, using minimum_temp as fallback"
+            "Global: No target temperatures available for any scheduled zone, using minimum_temp as fallback"
         )
         return self.coordinator.minimum_temp
 
@@ -823,6 +812,19 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
                 "active": len(all_boosted_rooms) > 0,
                 "room_ids": all_boosted_rooms,
             },
+
+            # Manual override summary
+            "manual_override": {
+                "active": any(
+                    zone_data.get("manual_zone_override", {}).get("active", False)
+                    for zone_data in self.coordinator.data.values()
+                ),
+                "zones": [
+                    zone_id
+                    for zone_id, zone_data in self.coordinator.data.items()
+                    if zone_data.get("manual_zone_override", {}).get("active", False)
+                ],
+            },
         }
 
         # Add system-wide TRV offset statistics
@@ -866,98 +868,52 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
         return attrs
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
-        """Set new target temperature for all rooms in all zones - triggers boost if higher than scheduled."""
+        """Set new target temperature as a manual zone override across all zones.
+
+        Clears any per-room manual overrides in all zones (boosts are preserved).
+        Equal to a zone's scheduled temp → clear that zone's manual override.
+        Any other value → set manual zone override (persists until schedule changes).
+        Boost is only triggered via the boost preset or set_boost service.
+        """
         temperature = kwargs.get(ATTR_TEMPERATURE)
         if temperature is None:
             return
 
         from homeassistant.util import dt as dt_util
         current_time = dt_util.now()
-
         zones = self.coordinator.config.get("zones", {})
-        total_boosted = 0
-        total_cleared = 0
 
-        # Process each zone
         for zone_id, zone_config in zones.items():
             scheduled_temp = self.coordinator.schedule_manager.get_scheduled_temperature(zone_config, current_time)
             rooms = zone_config.get("rooms", {})
-
-            # Only trigger boost if the requested temperature is higher than scheduled
-            if temperature > scheduled_temp:
-                # Boost all rooms in the zone that have sensors
-                for room_id, room_config in rooms.items():
-                    if room_config.get("sensors"):  # Only boost rooms with sensors
-                        await self.coordinator.set_boost(
-                            zone_id,
-                            room_id,
-                            temperature=temperature
-                        )
-                        total_boosted += 1
+            for room_id in rooms:
+                await self.coordinator.clear_manual_room_temperature(zone_id, room_id)
+            if temperature == scheduled_temp:
+                await self.coordinator.clear_manual_zone_temperature(zone_id)
             else:
-                # If temperature is lower or equal to scheduled, clear all boosts in this zone
-                for room_id in rooms.keys():
-                    await self.coordinator.clear_boost(zone_id, room_id)
-                    total_cleared += 1
-
-        if total_boosted > 0:
-            _LOGGER.info(
-                "Global: Set boost to %.1f°C for %d rooms across all zones",
-                temperature,
-                total_boosted,
-            )
-        elif total_cleared > 0:
-            _LOGGER.info(
-                "Global: Cleared boosts for %d rooms across all zones (requested temp %.1f°C <= scheduled)",
-                total_cleared,
-                temperature,
-            )
-
-        self.async_write_ha_state()
+                await self.coordinator.set_manual_zone_temperature(zone_id, temperature)
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set new preset mode for all zones."""
         if preset_mode == "away":
             await self.coordinator.set_away_mode(True)
-            _LOGGER.info("Global: Preset 'away' activated - away mode enabled")
         elif preset_mode == "boost":
-            # Boost all rooms in all zones using default boost logic (current temp + boost increase)
             zones = self.coordinator.config.get("zones", {})
-            total_boosted = 0
-
             for zone_id, zone_config in zones.items():
                 rooms = zone_config.get("rooms", {})
                 for room_id, room_config in rooms.items():
-                    if room_config.get("sensors"):  # Only boost rooms with sensors
-                        await self.coordinator.set_boost(
-                            zone_id,
-                            room_id,
-                            temperature=None  # Uses default: current room temp + boost increase
-                        )
-                        total_boosted += 1
-
-            _LOGGER.info(
-                "Global: Preset 'boost' activated - boosted %d rooms across all zones",
-                total_boosted,
-            )
-            # Refresh coordinator to immediately update all entities
-            await self.coordinator.async_request_refresh()
+                    if room_config.get("sensors"):
+                        await self.coordinator.set_boost(zone_id, room_id, temperature=None)
         elif preset_mode == "schedule":
-            # Clear away mode and all boosts
             if self.coordinator.away_mode:
                 await self.coordinator.set_away_mode(False)
-
             zones = self.coordinator.config.get("zones", {})
             for zone_id, zone_config in zones.items():
                 rooms = zone_config.get("rooms", {})
-                for room_id in rooms.keys():
+                for room_id in rooms:
                     await self.coordinator.clear_boost(zone_id, room_id)
-
-            _LOGGER.info("Global: Preset 'schedule' activated - all boosts cleared, away mode disabled")
-            # Refresh coordinator to immediately update all entities
-            await self.coordinator.async_request_refresh()
-
-        self.async_write_ha_state()
+                    await self.coordinator.clear_manual_room_temperature(zone_id, room_id)
+                await self.coordinator.clear_manual_zone_temperature(zone_id)
 
     @callback
     def _handle_coordinator_update(self) -> None:

@@ -72,6 +72,9 @@ CONFIG_SCHEMA = vol.Schema(
                     CONF_FALLBACK_MODE, default=DEFAULT_FALLBACK_MODE
                 ): cv.string,
                 vol.Optional(
+                    CONF_BOOST_DURATION, default=DEFAULT_BOOST_DURATION
+                ): cv.positive_int,
+                vol.Optional(
                     CONF_HEATING_DEADBAND, default=DEFAULT_HEATING_DEADBAND
                 ): vol.Coerce(float),
                 vol.Optional(
@@ -270,4 +273,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
+    hass.services.async_remove(DOMAIN, SERVICE_SET_MODE)
+    hass.data.pop(DOMAIN, None)
     return True

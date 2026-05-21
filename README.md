@@ -149,14 +149,13 @@ heating_manager:
 After restarting, the integration will create the following entities:
 
 **Global:**
-- `binary_sensor.hm_global_heating_demand` - Combined heating demand (OR of all zones)
+- `climate.heating_manager_global` - Global climate entity showing combined heating demand across all zones
 
 **Per Zone:**
-- `climate.hm_<zone_id>` - Zone climate control with manual temperature adjustment
-- `binary_sensor.hm_<zone_id>_heating_demand` - Zone heating demand indicator (on = heat required)
+- `climate.heating_manager_<zone_id>_zone` - Zone climate entity with manual temperature adjustment and heating demand status
 
 **Per Room:**
-- `climate.hm_<room_id>` - Room climate control entity
+- `climate.heating_manager_<zone_id>_<room_id>` - Room climate control entity
 
   Structured attributes for better organization:
   - **Identification**:
@@ -165,13 +164,16 @@ After restarting, the integration will create the following entities:
     - `needs_heating` - Boolean indicating if heating is required
     - `away_mode` - Current away mode status
   - **Boost** (grouped object):
-    - `temperature` - Boost target temperature (null if not active)
-    - `end_time` - When boost will end (ISO format)
-    - `duration_minutes` - Total boost duration
-    - `time_remaining_minutes` - Minutes remaining
+    - `boost.temperature` - Boost target temperature (null if not active)
+    - `boost.end_time` - When boost will end (ISO format)
+    - `boost.duration_minutes` - Total boost duration
+    - `boost.time_remaining_minutes` - Minutes remaining
   - **Sensors** (array of sensor status objects):
     - Each sensor includes: `entity_id`, `value`, `last_seen`, `last_seen_source`, `status`
     - Status values: `"active"`, `"timeout"`, `"unavailable"`, `"invalid"`
+  - **Manual Override** (grouped object):
+    - `manual_override.active` - Boolean, true if a manual room override is set
+    - `manual_override.temperature` - The manual override temperature (null if not active)
   - **TRV Control** (grouped object, only present if TRVs exist):
     - `enabled` - Whether intelligent control is active
     - `trvs` - Array of TRV offset data with `entity_id`, `internal_temp`, `current_offset`, `learned_offset`, `setpoint`
@@ -184,9 +186,9 @@ Each zone has a climate entity with the following features:
 
 - **HVAC Modes**: Heat, Off
 - **Preset Modes**:
-  - `schedule` - Follow the configured schedule
+  - `schedule` - Follow the configured schedule (also clears any active boost or manual override)
   - `away` - Frost protection mode
-  - `manual` - Manual control or boost active
+  - `boost` - Temporarily boost room temperature above the schedule
 
 ### Room Boost
 
@@ -211,7 +213,7 @@ data:
 ```
 
 **Check boost status:** All boost information is available in the room climate entity attributes:
-- `climate.living_room_hm` → attributes → `boost.temperature`, `boost.time_remaining_minutes`, etc.
+- `climate.heating_manager_downstairs_living_room` → attributes → `boost.temperature`, `boost.time_remaining_minutes`, etc.
 
 ### Heating Mode
 
@@ -233,21 +235,9 @@ data:
   mode: away
 ```
 
-### Manual Override Control
+### Heating Demand
 
-If you want the system to ignore manual TRV adjustments (like a child lock):
-
-```yaml
-service: heating_manager.ignore_manual_override
-data:
-  zone_id: downstairs
-  room_id: living_room
-  ignore: true  # true = ignore manual changes, false = respect them
-```
-
-### Heating Demand Sensor
-
-Each zone has a binary sensor (`binary_sensor.hm_<zone_id>_heating_demand`) that indicates when heating is required. This is useful for:
+Each zone climate entity (`climate.heating_manager_<zone_id>_zone`) exposes heating demand via its `hvac_action` attribute (`heating` or `idle`) and the `heating_demand` state attribute. This is useful for:
 
 - **Triggering boilers/heating systems** when any room in the zone needs heat
 - **Controlling towel radiators** or other non-TRV radiators
@@ -280,8 +270,8 @@ zones:
     schedule: ...
 ```
 
-The sensor is **ON** based on the configured mode:
-- **any_room**: Any room temperature < target - deadband (smart logic applied per room), OR any room has active boost
+The zone's `hvac_action` is `heating` based on the configured mode:
+- **any_room**: Any room temperature < target - deadband (smart logic applied per room)
 - **zone_average**: Average room temp < average target temp - deadband
 
 **Example: Control Boiler Based on Zone Demand**
@@ -291,8 +281,9 @@ automation:
   - alias: "Turn on Downstairs Heating"
     trigger:
       - platform: state
-        entity_id: binary_sensor.hm_zone_1_heating_demand
-        to: "on"
+        entity_id: climate.heating_manager_downstairs_zone
+        attribute: hvac_action
+        to: "heating"
     action:
       - service: switch.turn_on
         target:
@@ -301,8 +292,9 @@ automation:
   - alias: "Turn off Downstairs Heating"
     trigger:
       - platform: state
-        entity_id: binary_sensor.hm_zone_1_heating_demand
-        to: "off"
+        entity_id: climate.heating_manager_downstairs_zone
+        attribute: hvac_action
+        to: "idle"
         for: "00:05:00"  # 5 minute delay to prevent short cycling
     action:
       - service: switch.turn_off
@@ -310,14 +302,21 @@ automation:
           entity_id: switch.boiler_zone_1
 ```
 
-The sensor attributes include:
-- `rooms_needing_heat` - List of room IDs requiring heating
-- `boosted_rooms` - List of room IDs with active boost
+The zone climate entity attributes include:
+- `heating_demand` - Boolean, true when zone requires heating
+- `rooms_needing_heat` - List of room IDs currently requiring heating
+- `boost.active` - Boolean, true if any room in the zone has an active boost
+- `boost.room_ids` - List of room IDs with active boost
+- `manual_override.active` - Boolean, true if a zone-level manual override is set
+- `manual_override.temperature` - The manual override temperature (null if not active)
 - `away_mode` - Current away mode status
+- `schedule.current_temperature` - Currently scheduled target temperature
+- `schedule.current_period` - Current schedule period (`start`, `end`, `temperature`)
+- `schedule.next_period` - Next schedule period
 
 ### Global Heating Demand
 
-The integration also provides a global heating demand sensor (`binary_sensor.hm_global_heating_demand`) that combines ALL zones using OR logic. This sensor is **ON** when ANY zone requires heating.
+The global climate entity (`climate.heating_manager_global`) combines ALL zones using OR logic. Its `hvac_action` is `heating` when ANY zone requires heating.
 
 This is particularly useful for:
 - **Controlling a main boiler** that serves multiple zones
@@ -331,8 +330,9 @@ automation:
   - alias: "Turn on Main Boiler"
     trigger:
       - platform: state
-        entity_id: binary_sensor.hm_global_heating_demand
-        to: "on"
+        entity_id: climate.heating_manager_global
+        attribute: hvac_action
+        to: "heating"
     action:
       - service: switch.turn_on
         target:
@@ -341,8 +341,9 @@ automation:
   - alias: "Turn off Main Boiler"
     trigger:
       - platform: state
-        entity_id: binary_sensor.hm_global_heating_demand
-        to: "off"
+        entity_id: climate.heating_manager_global
+        attribute: hvac_action
+        to: "idle"
         for: "00:05:00"  # 5 minute delay to prevent short cycling
     action:
       - service: switch.turn_off
@@ -350,15 +351,16 @@ automation:
           entity_id: switch.main_boiler
 ```
 
-The global sensor attributes include:
-- `zones_needing_heat` - List of zone IDs requiring heating
-- `rooms_needing_heat` - List of "zone_id/room_id" pairs requiring heating
-- `boosted_rooms` - List of "zone_id/room_id" pairs with active boost
+The global climate entity attributes include:
+- `heating.zones_needing_heat` - List of zone IDs requiring heating
+- `heating.rooms_needing_heat` - List of "zone_id/room_id" pairs requiring heating
+- `boost.active` - Boolean, true if any room in any zone has an active boost
+- `boost.room_ids` - List of "zone_id/room_id" pairs with active boost
 - `total_zones` - Total number of configured zones
-- `zones_demanding_count` - Number of zones currently demanding heat
+- `zones_demanding_heat` - Number of zones currently demanding heat
 - `away_mode` - Current away mode status
 
-**Flexibility:** You can choose to control zones individually using per-zone sensors, or use the global sensor for centralized boiler control. Both approaches work simultaneously.
+**Flexibility:** You can choose to control zones individually using per-zone climate entities, or use the global entity for centralized boiler control. Both approaches work simultaneously.
 
 ## Temperature Logic
 
@@ -398,12 +400,32 @@ sensors:
 
 The system automatically uses the most accurate timestamp available and indicates the source in sensor attributes (`last_seen_source`: `"dedicated_sensor"` or `"state_last_updated"`).
 
-### Boost Behavior
+### Temperature Override Behaviour
 
-- Default boost: +2°C above current room temperature for 30 minutes
-- Boost is independent per room - other rooms in the zone continue following schedule
+**Manual room override** (dragging the temperature slider on a room climate entity):
+- Sets a per-room manual temperature that overrides the schedule and any zone-level override
+- Behaviour depends on whether boost is currently active for that room:
+  - **No boost active**: any temperature other than the current scheduled temperature sets a manual room override; setting back to the scheduled temperature clears it immediately
+  - **Boost active + new temp above schedule**: keeps boost running but updates its target temperature
+  - **Boost active + new temp below schedule**: clears boost and sets a manual room override at the lower temperature
+  - **Boost active + new temp equals schedule**: clears both boost and manual override (reverts to schedule)
+- Persists until the schedule moves to a different temperature period, then automatically clears
+- Switching preset back to `schedule` also clears the override
+
+**Manual zone override** (dragging the temperature slider on a zone climate entity):
+- Sets a zone-wide manual temperature that overrides the schedule for all rooms in the zone
+- Per-room manual overrides are cleared when a zone override is set
+- Persists until the schedule moves to a different temperature period, then automatically clears
+- Switching preset back to `schedule` also clears the override
+
+**Boost** (via the `boost` preset or `set_boost` service):
+- Temporarily raises a specific room's temperature above the schedule
+- Default: +2°C above current room temperature for 30 minutes
+- Room-level — other rooms in the zone continue following the schedule
+- Any existing manual room override for that room is cleared when boost activates
 - Boost state persists across Home Assistant restarts
-- When boost expires, room returns to scheduled temperature
+- When boost expires, room returns to the scheduled (or manual zone) temperature
+- Switching preset back to `schedule` also clears any active boost
 
 ### Room Temperature Offsets
 
@@ -467,9 +489,9 @@ automation:
         to: "home"
     action:
       - service: heating_manager.set_boost
+        target:
+          entity_id: climate.heating_manager_downstairs_living_room
         data:
-          zone_id: downstairs
-          room_id: living_room
           duration: 120
           temperature: 22
 ```
@@ -518,9 +540,9 @@ automation:
           - fri
     action:
       - service: heating_manager.set_boost
+        target:
+          entity_id: climate.heating_manager_upstairs_bedroom
         data:
-          zone_id: zone_2
-          room_id: bedroom_1
           duration: 30
 ```
 
@@ -533,8 +555,8 @@ template:
   - sensor:
       - name: "Living Room Boost Status"
         state: >
-          {% if state_attr('climate.living_room_hm', 'boost')['temperature'] %}
-            Boost active: {{ state_attr('climate.living_room_hm', 'boost')['time_remaining_minutes'] }} min remaining
+          {% if state_attr('climate.heating_manager_downstairs_living_room', 'boost')['temperature'] %}
+            Boost active: {{ state_attr('climate.heating_manager_downstairs_living_room', 'boost')['time_remaining_minutes'] }} min remaining
           {% else %}
             Not boosted
           {% endif %}
@@ -709,13 +731,14 @@ derivative_smoothing_factor: 0.3  # EMA smoothing for rate calculations (default
 **Analytics data is available in room climate entity attributes:**
 ```yaml
 heating_analytics:
-  heating_rate: 1.8  # °C per hour when heating
-  cooling_rate: -0.4  # °C per hour when not heating
-  eta_minutes: 45  # Estimated minutes to reach target
-  eta_timestamp: "2024-01-15T14:30:00+00:00"  # When target will be reached
-  confidence: 0.85  # Confidence in prediction (0.0-1.0)
-  samples_count: 15  # Number of samples used
-  trend: "heating_rapidly"  # Current heating trend
+  heating_rate_per_hour: 1.8        # °C per hour when heating
+  cooling_rate_per_hour: -0.4       # °C per hour when not heating
+  estimated_time_to_target:
+    minutes: 45                     # Estimated minutes to reach target
+    timestamp: "2024-01-15T14:30:00+00:00"  # When target will be reached
+    confidence_percent: 85          # Confidence in prediction (0-100)
+  temperature_trend: "heating_rapidly"  # Current heating trend
+  samples_count: 15                 # Number of samples used
 ```
 
 **Use cases:**

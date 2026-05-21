@@ -54,7 +54,7 @@ class BoostManager:
         duration: int | None = None,
         temperature: float | None = None,
         get_room_temp_callback=None,
-    ) -> None:
+    ) -> bool:
         """Set boost mode for a room.
 
         Args:
@@ -64,17 +64,20 @@ class BoostManager:
             duration: Boost duration in minutes (uses default if None)
             temperature: Target boost temperature (calculated from current temp if None)
             get_room_temp_callback: Async callback to get room temperature (required if temperature is None)
+
+        Returns:
+            True if boost was set, False if it could not be set.
         """
         # Verify room exists and has sensors
         zones = config.get(CONF_ZONES, {})
         if zone_id not in zones:
             _LOGGER.error("Zone %s not found", zone_id)
-            return
+            return False
 
         rooms = zones[zone_id].get(CONF_ROOMS, {})
         if room_id not in rooms:
             _LOGGER.error("Room %s not found in zone %s", room_id, zone_id)
-            return
+            return False
 
         # Check if room has sensors
         sensors = rooms[room_id].get(CONF_SENSORS, [])
@@ -84,7 +87,7 @@ class BoostManager:
                 room_id,
                 zone_id,
             )
-            return
+            return False
 
         # Calculate boost parameters
         if duration is None:
@@ -99,11 +102,18 @@ class BoostManager:
                 _LOGGER.error(
                     "Cannot calculate boost temperature: no callback provided"
                 )
-                return
+                return False
 
             room_temp, _ = await get_room_temp_callback(
                 zone_id, room_id, rooms[room_id], zones
             )
+            if room_temp is None:
+                _LOGGER.error(
+                    "Cannot calculate boost temperature for %s/%s: room temperature unavailable",
+                    zone_id,
+                    room_id,
+                )
+                return False
             temperature = room_temp + DEFAULT_BOOST_TEMP_INCREASE
             _LOGGER.debug(
                 "Boost temperature calculated from current room temp: %.1f°C + %.1f°C = %.1f°C",
@@ -127,6 +137,24 @@ class BoostManager:
             temperature,
             duration,
         )
+        return True
+
+    def update_temperature(self, zone_id: str, room_id: str, temperature: float) -> bool:
+        """Update the target temperature of an active boost, preserving its end time.
+
+        Returns:
+            True if the boost was updated, False if no active boost exists.
+        """
+        if zone_id in self.boost_state and room_id in self.boost_state[zone_id]:
+            self.boost_state[zone_id][room_id]["temperature"] = temperature
+            _LOGGER.info(
+                "Boost temperature updated for %s/%s: %.1f°C",
+                zone_id,
+                room_id,
+                temperature,
+            )
+            return True
+        return False
 
     def clear_boost(self, zone_id: str, room_id: str) -> bool:
         """Clear boost mode for a room.

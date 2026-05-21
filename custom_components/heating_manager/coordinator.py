@@ -70,7 +70,9 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
 
         # Runtime state
         self.away_mode = False
-        self.manual_zone_temp: dict[str, dict] = {}  # zone_id -> {temperature, until_next_schedule}
+        self.manual_zone_temp: dict[str, dict] = {}  # zone_id -> {temperature, last_scheduled_temp}
+        self.manual_room_temp: dict[str, dict[str, dict]] = {}  # zone_id -> room_id -> {temperature, last_scheduled_temp}
+        self._loaded_state = False
 
         # Initialize manager components
         self.temperature_manager = TemperatureManager(hass)
@@ -104,7 +106,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         """Fetch data from sensors and update heating logic."""
         try:
             # Load persistent state on first run
-            if not hasattr(self, "_loaded_state"):
+            if not self._loaded_state:
                 await self._load_state()
                 self._loaded_state = True
 
@@ -132,7 +134,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     # Check for boost
                     boost_info = self.boost_manager.get_boost_info(zone_id, room_id, current_time)
 
-                    # Get target temperature - priority: away > boost > manual zone > schedule
+                    # Get target temperature - priority: away > boost > manual room > manual zone > schedule
                     if self.away_mode:
                         target_temp = self.frost_protection_temp
                         _LOGGER.debug(
@@ -149,6 +151,30 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                             room_id,
                             target_temp,
                         )
+                    elif zone_id in self.manual_room_temp and room_id in self.manual_room_temp[zone_id]:
+                        room_manual_info = self.manual_room_temp[zone_id][room_id]
+                        scheduled_temp = self.schedule_manager.get_scheduled_temperature(
+                            zone_config, current_time
+                        )
+                        if scheduled_temp != room_manual_info.get("last_scheduled_temp"):
+                            del self.manual_room_temp[zone_id][room_id]
+                            if not self.manual_room_temp[zone_id]:
+                                del self.manual_room_temp[zone_id]
+                            target_temp = scheduled_temp
+                            _LOGGER.debug(
+                                "Zone %s / Room %s: Schedule changed, cleared room manual override, using scheduled temp: %.1f°C",
+                                zone_id,
+                                room_id,
+                                target_temp,
+                            )
+                        else:
+                            target_temp = room_manual_info["temperature"]
+                            _LOGGER.debug(
+                                "Zone %s / Room %s: Using room manual temp: %.1f°C",
+                                zone_id,
+                                room_id,
+                                target_temp,
+                            )
                     elif zone_id in self.manual_zone_temp:
                         # Check if manual temp should still be active
                         manual_info = self.manual_zone_temp[zone_id]
@@ -161,7 +187,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                             del self.manual_zone_temp[zone_id]
                             target_temp = scheduled_temp
                             _LOGGER.debug(
-                                "Zone %s / Room %s: Schedule changed, cleared manual override, using scheduled temp: %.1f°C",
+                                "Zone %s / Room %s: Schedule changed, cleared zone manual override, using scheduled temp: %.1f°C",
                                 zone_id,
                                 room_id,
                                 target_temp,
@@ -169,7 +195,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                         else:
                             target_temp = manual_info["temperature"]
                             _LOGGER.debug(
-                                "Zone %s / Room %s: Using manual temp: %.1f°C",
+                                "Zone %s / Room %s: Using zone manual temp: %.1f°C",
                                 zone_id,
                                 room_id,
                                 target_temp,
@@ -254,6 +280,17 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                         "temperature_last_seen": temp_metadata["last_seen"],
                         "trv_offset_info": trv_offset_info,
                         "heating_analytics": analytics_dict,
+                        "manual_room_override": {
+                            "active": (
+                                zone_id in self.manual_room_temp
+                                and room_id in self.manual_room_temp.get(zone_id, {})
+                            ),
+                            "temperature": (
+                                self.manual_room_temp.get(zone_id, {})
+                                .get(room_id, {})
+                                .get("temperature")
+                            ),
+                        },
                     }
 
                 # Calculate zone heating demand based on configured mode
@@ -264,11 +301,12 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     zone_data["rooms"], zone_demand_mode
                 )
                 zone_data["heating_demand_mode"] = zone_demand_mode
+                zone_data["manual_zone_override"] = {
+                    "active": zone_id in self.manual_zone_temp,
+                    "temperature": self.manual_zone_temp.get(zone_id, {}).get("temperature"),
+                }
 
                 result[zone_id] = zone_data
-
-            # Save state periodically
-            await self._save_state()
 
             return result
 
@@ -284,26 +322,95 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         temperature: float | None = None,
     ) -> None:
         """Set boost mode for a room."""
-        await self.boost_manager.set_boost(
+        if await self.boost_manager.set_boost(
             zone_id,
             room_id,
             self.config,
             duration,
             temperature,
             get_room_temp_callback=self.temperature_manager.get_room_temperature,
-        )
-        await self.async_request_refresh()
+        ):
+            # Clear any manual room override so it doesn't linger while boost is active
+            if zone_id in self.manual_room_temp and room_id in self.manual_room_temp[zone_id]:
+                del self.manual_room_temp[zone_id][room_id]
+                if not self.manual_room_temp[zone_id]:
+                    del self.manual_room_temp[zone_id]
+            await self._save_state()
+            await self.async_request_refresh()
+
+    async def update_boost_temperature(
+        self, zone_id: str, room_id: str, temperature: float
+    ) -> None:
+        """Update the target temperature of an active boost without changing its end time."""
+        if self.boost_manager.update_temperature(zone_id, room_id, temperature):
+            await self._save_state()
+            await self.async_request_refresh()
 
     async def clear_boost(self, zone_id: str, room_id: str) -> None:
         """Clear boost mode for a room."""
         if self.boost_manager.clear_boost(zone_id, room_id):
+            await self._save_state()
             await self.async_request_refresh()
 
     async def set_away_mode(self, enabled: bool) -> None:
         """Set away mode."""
         self.away_mode = enabled
         _LOGGER.info("Away mode %s", "enabled" if enabled else "disabled")
+        await self._save_state()
         await self.async_request_refresh()
+
+    async def clear_manual_zone_temperature(self, zone_id: str) -> None:
+        """Clear manual temperature override for a zone, reverting to schedule."""
+        if zone_id in self.manual_zone_temp:
+            del self.manual_zone_temp[zone_id]
+            _LOGGER.info("Manual temperature cleared for zone %s", zone_id)
+            await self._save_state()
+            await self.async_request_refresh()
+
+    async def set_manual_room_temperature(
+        self, zone_id: str, room_id: str, temperature: float
+    ) -> None:
+        """Set manual temperature for a specific room until next schedule change."""
+        zones = self.config.get("zones", {})
+        if zone_id not in zones:
+            _LOGGER.error("Zone %s not found", zone_id)
+            return
+        if room_id not in zones[zone_id].get(CONF_ROOMS, {}):
+            _LOGGER.error("Room %s not found in zone %s", room_id, zone_id)
+            return
+
+        zone_config = zones[zone_id]
+        current_time = dt_util.now()
+        current_scheduled_temp = self.schedule_manager.get_scheduled_temperature(
+            zone_config, current_time
+        )
+
+        if zone_id not in self.manual_room_temp:
+            self.manual_room_temp[zone_id] = {}
+
+        self.manual_room_temp[zone_id][room_id] = {
+            "temperature": temperature,
+            "last_scheduled_temp": current_scheduled_temp,
+        }
+
+        _LOGGER.info(
+            "Manual room temperature set for %s/%s: %.1f°C (until schedule changes)",
+            zone_id,
+            room_id,
+            temperature,
+        )
+        await self._save_state()
+        await self.async_request_refresh()
+
+    async def clear_manual_room_temperature(self, zone_id: str, room_id: str) -> None:
+        """Clear manual room temperature override, reverting to zone override or schedule."""
+        if zone_id in self.manual_room_temp and room_id in self.manual_room_temp[zone_id]:
+            del self.manual_room_temp[zone_id][room_id]
+            if not self.manual_room_temp[zone_id]:
+                del self.manual_room_temp[zone_id]
+            _LOGGER.info("Manual room temperature cleared for %s/%s", zone_id, room_id)
+            await self._save_state()
+            await self.async_request_refresh()
 
     async def set_manual_zone_temperature(
         self, zone_id: str, temperature: float
@@ -330,6 +437,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             zone_id,
             temperature,
         )
+        await self._save_state()
         await self.async_request_refresh()
 
     async def _load_state(self) -> None:
@@ -339,6 +447,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         if data:
             self.away_mode = data.get("away_mode", False)
             self.manual_zone_temp = data.get("manual_zone_temp", {})
+            self.manual_room_temp = data.get("manual_room_temp", {})
 
             # Restore boost state (only if not expired)
             stored_boost = data.get("boost_state", {})
@@ -363,6 +472,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             "away_mode": self.away_mode,
             "boost_state": self.boost_manager.get_state_for_storage(),
             "manual_zone_temp": self.manual_zone_temp,
+            "manual_room_temp": self.manual_room_temp,
             "room_heating_state": self.heating_logic.get_state_for_storage(),
             "trv_offset_history": self.trv_controller.get_offset_history_for_storage(),
         }
