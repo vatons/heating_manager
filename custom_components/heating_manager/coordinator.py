@@ -70,9 +70,11 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         self.boost_duration = boost_duration
         self.heating_deadband = heating_deadband
         self.heating_demand_mode = config.get(CONF_HEATING_DEMAND_MODE, DEFAULT_HEATING_DEMAND_MODE)
-        # Use Store without version parameter to avoid HA's migration system.
-        # We handle our own internal schema versioning via _migrate_storage_data.
-        self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+        # Store is always initialised at HA-level version 1. HA's migration hook
+        # only fires when this value changes, which would require a registered
+        # migration_func. Our internal schema changes are handled entirely by
+        # _migrate_storage_data using the version field inside the data dict.
+        self._store = Store(hass, 1, STORAGE_KEY)
 
         # Runtime state
         self.away_mode = False
