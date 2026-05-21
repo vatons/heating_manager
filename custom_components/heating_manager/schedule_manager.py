@@ -57,6 +57,10 @@ class ScheduleManager:
         )
         return self.minimum_temp
 
+    def is_time_in_period(self, start: str | None, end: str | None, current: str) -> bool:
+        """Public wrapper around _time_in_range for use by external callers."""
+        return self._time_in_range(start, end, current)
+
     def _time_in_range(self, start: str | None, end: str | None, current: str) -> bool:
         """Check if current time is within start and end times.
 

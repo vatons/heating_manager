@@ -552,7 +552,7 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
         for period in day_schedule:
             start = period.get("start")
             end = period.get("end")
-            if self.coordinator.schedule_manager._time_in_range(start, end, current_time_str):
+            if self.coordinator.schedule_manager.is_time_in_period(start, end, current_time_str):
                 current_period = {
                     "start": start,
                     "end": end,
