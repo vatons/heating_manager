@@ -321,8 +321,10 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
             self._zone_id, self._room_id, current_time
         )
 
+        _TEMP_TOLERANCE = 0.05  # °C — treat as "equal to schedule" within this margin
+
         if boost_info:
-            if temperature == scheduled_temp:
+            if abs(temperature - scheduled_temp) <= _TEMP_TOLERANCE:
                 await self.coordinator.clear_boost(self._zone_id, self._room_id)
                 await self.coordinator.clear_manual_room_temperature(self._zone_id, self._room_id)
             elif temperature < scheduled_temp:
@@ -333,7 +335,7 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
                 await self.coordinator.update_boost_temperature(self._zone_id, self._room_id, temperature)
             return
 
-        if temperature == scheduled_temp:
+        if abs(temperature - scheduled_temp) <= _TEMP_TOLERANCE:
             await self.coordinator.clear_manual_room_temperature(self._zone_id, self._room_id)
         else:
             await self.coordinator.set_manual_room_temperature(self._zone_id, self._room_id, temperature)
@@ -630,9 +632,11 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
         scheduled_temp = self.coordinator.schedule_manager.get_scheduled_temperature(zone_config, current_time)
         rooms = zone_config.get("rooms", {})
 
+        _TEMP_TOLERANCE = 0.05
+
         for room_id in rooms:
             await self.coordinator.clear_manual_room_temperature(self._zone_id, room_id)
-        if temperature == scheduled_temp:
+        if abs(temperature - scheduled_temp) <= _TEMP_TOLERANCE:
             await self.coordinator.clear_manual_zone_temperature(self._zone_id)
         else:
             await self.coordinator.set_manual_zone_temperature(self._zone_id, temperature)
@@ -886,12 +890,14 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
         current_time = dt_util.now()
         zones = self.coordinator.config.get("zones", {})
 
+        _TEMP_TOLERANCE = 0.05
+
         for zone_id, zone_config in zones.items():
             scheduled_temp = self.coordinator.schedule_manager.get_scheduled_temperature(zone_config, current_time)
             rooms = zone_config.get("rooms", {})
             for room_id in rooms:
                 await self.coordinator.clear_manual_room_temperature(zone_id, room_id)
-            if temperature == scheduled_temp:
+            if abs(temperature - scheduled_temp) <= _TEMP_TOLERANCE:
                 await self.coordinator.clear_manual_zone_temperature(zone_id)
             else:
                 await self.coordinator.set_manual_zone_temperature(zone_id, temperature)
