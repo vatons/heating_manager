@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -368,21 +369,26 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         temperature: float | None = None,
     ) -> None:
         """Set boost mode for a room."""
-        if await self.boost_manager.set_boost(
+        success = await self.boost_manager.set_boost(
             zone_id,
             room_id,
             self.config,
             duration,
             temperature,
             get_room_temp_callback=self.temperature_manager.get_room_temperature,
-        ):
-            # Clear any manual room override so it doesn't linger while boost is active
-            if zone_id in self.manual_room_temp and room_id in self.manual_room_temp[zone_id]:
-                del self.manual_room_temp[zone_id][room_id]
-                if not self.manual_room_temp[zone_id]:
-                    del self.manual_room_temp[zone_id]
-            await self._save_state()
-            await self.async_request_refresh()
+        )
+        if not success:
+            raise HomeAssistantError(
+                f"Failed to set boost for {zone_id}/{room_id}: "
+                "room not found, has no sensors, or room temperature is unavailable"
+            )
+        # Clear any manual room override so it doesn't linger while boost is active
+        if zone_id in self.manual_room_temp and room_id in self.manual_room_temp[zone_id]:
+            del self.manual_room_temp[zone_id][room_id]
+            if not self.manual_room_temp[zone_id]:
+                del self.manual_room_temp[zone_id]
+        await self._save_state()
+        await self.async_request_refresh()
 
     async def update_boost_temperature(
         self, zone_id: str, room_id: str, temperature: float
