@@ -39,6 +39,12 @@ async def async_setup_platform(
     discovery_info: dict | None = None,
 ) -> None:
     """Set up the climate platform."""
+    if DOMAIN not in hass.data or "coordinator" not in hass.data[DOMAIN]:
+        _LOGGER.error(
+            "Heating manager coordinator not found in hass.data. "
+            "Ensure the integration is configured in configuration.yaml before the climate platform loads."
+        )
+        return
     coordinator: HeatingManagerCoordinator = hass.data[DOMAIN]["coordinator"]
 
     entities = []
