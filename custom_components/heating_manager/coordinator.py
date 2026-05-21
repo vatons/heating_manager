@@ -118,6 +118,11 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             zones = self.config.get("zones", {})
             current_time = dt_util.now()
             _state_changed = False  # Track whether any override was auto-expired
+            # Collect expired overrides to delete after iterating — avoids mutating
+            # manual_room_temp / manual_zone_temp while inside an async loop where
+            # an await point between check and delete could cause a race.
+            _expired_room_overrides: list[tuple[str, str]] = []  # (zone_id, room_id)
+            _expired_zone_overrides: list[str] = []  # zone_id
 
             result = {}
 
@@ -163,9 +168,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                             zone_config, current_time
                         )
                         if scheduled_temp != room_manual_info.get("last_scheduled_temp"):
-                            del self.manual_room_temp[zone_id][room_id]
-                            if not self.manual_room_temp[zone_id]:
-                                del self.manual_room_temp[zone_id]
+                            _expired_room_overrides.append((zone_id, room_id))
                             target_temp = scheduled_temp
                             _state_changed = True
                             _LOGGER.debug(
@@ -191,7 +194,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
 
                         # If schedule changed, clear manual override
                         if scheduled_temp != manual_info.get("last_scheduled_temp"):
-                            del self.manual_zone_temp[zone_id]
+                            _expired_zone_overrides.append(zone_id)
                             target_temp = scheduled_temp
                             _state_changed = True
                             _LOGGER.debug(
@@ -351,6 +354,15 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     self._zone_heating_start.pop(zone_id, None)
 
                 result[zone_id] = zone_data
+
+            # Apply deferred override deletions collected during the room loop
+            for zone_id, room_id in _expired_room_overrides:
+                if zone_id in self.manual_room_temp:
+                    self.manual_room_temp[zone_id].pop(room_id, None)
+                    if not self.manual_room_temp[zone_id]:
+                        del self.manual_room_temp[zone_id]
+            for zone_id in _expired_zone_overrides:
+                self.manual_zone_temp.pop(zone_id, None)
 
             if _state_changed:
                 await self._save_state()
