@@ -115,6 +115,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
 
             zones = self.config.get("zones", {})
             current_time = dt_util.now()
+            _state_changed = False  # Track whether any override was auto-expired
 
             result = {}
 
@@ -164,6 +165,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                             if not self.manual_room_temp[zone_id]:
                                 del self.manual_room_temp[zone_id]
                             target_temp = scheduled_temp
+                            _state_changed = True
                             _LOGGER.debug(
                                 "Zone %s / Room %s: Schedule changed, cleared room manual override, using scheduled temp: %.1f°C",
                                 zone_id,
@@ -189,6 +191,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                         if scheduled_temp != manual_info.get("last_scheduled_temp"):
                             del self.manual_zone_temp[zone_id]
                             target_temp = scheduled_temp
+                            _state_changed = True
                             _LOGGER.debug(
                                 "Zone %s / Room %s: Schedule changed, cleared zone manual override, using scheduled temp: %.1f°C",
                                 zone_id,
@@ -344,6 +347,9 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     self._zone_heating_start.pop(zone_id, None)
 
                 result[zone_id] = zone_data
+
+            if _state_changed:
+                await self._save_state()
 
             return result
 
