@@ -54,7 +54,8 @@ DEFAULT_TRV_OVERSHOOT_ENABLED = True
 DEFAULT_TRV_OVERSHOOT_MAX = 5.0  # degrees (°C)
 DEFAULT_TRV_OVERSHOOT_THRESHOLD = 0.3  # degrees (°C)
 DEFAULT_TRV_COOLDOWN_OFFSET = 1.0  # degrees (°C)
-DEFAULT_TRV_OFFSET_EMA_ALPHA = 0.15  # EMA smoothing factor (0.1=stable, 0.2=responsive)
+DEFAULT_TRV_OFFSET_EMA_ALPHA = 0.15   # EMA smoothing factor (0.1=stable, 0.2=responsive)
+DEFAULT_TRV_DEFAULT_OFFSET = 0.0      # Initial assumed offset when no EMA history exists
 
 # Analytics defaults
 DEFAULT_ANALYTICS_ENABLED = True

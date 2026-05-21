@@ -5,6 +5,8 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
+from .const import DEFAULT_TRV_DEFAULT_OFFSET
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -51,8 +53,10 @@ class TRVController:
         # Store per-TRV since different TRVs in same room may have different offsets
         self.offset_ema: dict[str, dict[str, dict[str, float]]] = {}
 
-        # Default offset to use when no history available
-        self.default_offset = 2.0
+        # Default offset used before any EMA history is available.
+        # 0.0 rather than a positive value: assuming no offset is safer than
+        # assuming a fixed 2°C bias that may not apply to the actual TRV hardware.
+        self.default_offset = DEFAULT_TRV_DEFAULT_OFFSET
 
     def calculate_trv_setpoint(
         self,
