@@ -2,7 +2,7 @@
 
 A comprehensive Home Assistant custom component for managing multi-zone heating systems with schedules, room-level boost control, and intelligent temperature management.
 
-## Features
+## Features 
 
 - **Multi-Zone Management**: Organize your heating into logical zones (e.g., upstairs, downstairs)
 - **Schedule-Based Control**: Define weekday and weekend heating schedules for each zone
