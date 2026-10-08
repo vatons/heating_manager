@@ -563,6 +563,7 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
             # Heating status
             "heating_demand": zone_data.get("heating_demand", False),
             "heating_demand_mode": zone_data.get("heating_demand_mode", "any_room"),
+            "monitoring_only": zone_data.get("monitoring_only", False),
             "away_mode": self.coordinator.away_mode,
             "rooms_needing_heat": rooms_needing_heat,
 
@@ -680,12 +681,14 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
 
     @property
     def current_temperature(self) -> float | None:
-        """Return the average temperature across all zones."""
+        """Return the average temperature across all heated (not monitoring-only) zones."""
         if not self.coordinator.data:
             return None
 
         all_temps = []
         for zone_data in self.coordinator.data.values():
+            if zone_data.get("monitoring_only"):
+                continue
             rooms = zone_data.get("rooms", {})
             for room_data in rooms.values():
                 room_temp = room_data.get("temperature")
@@ -709,7 +712,7 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
         for zone_id, zone_data in self.coordinator.data.items():
             # Skip zones without a schedule — their target is just minimum_temp
             zone_config = zone_configs.get(zone_id, {})
-            if not zone_config.get("schedule"):
+            if not zone_config.get("schedule") or zone_data.get("monitoring_only"):
                 continue
             rooms = zone_data.get("rooms", {})
             for room_data in rooms.values():

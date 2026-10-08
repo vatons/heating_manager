@@ -592,3 +592,45 @@ async def test_room_named_zone_does_not_clash_with_zone_entity(hass, entry):
     assert "zone_2" in entry.options["zones"]["downstairs"]["rooms"]
     assert hass.states.get("climate.downstairs") is not None
     assert hass.states.get("climate.downstairs_zone") is not None
+
+
+# ---------------------------------------------------------------------------
+# Monitoring-only zones
+# ---------------------------------------------------------------------------
+
+async def test_toggle_monitoring_only(hass, entry, env):
+    async def set_monitoring(value):
+        flow_id = await open_options(hass, entry)
+        await menu(hass, flow_id, "zones")
+        await form(hass, flow_id, {"zone": "downstairs"})
+        result = await menu(hass, flow_id, "zone_edit")
+        assert "monitoring_only" in {str(k) for k in result["data_schema"].schema}
+        result = await form(hass, flow_id, {
+            "name": "Downstairs", "heating_demand_mode": "global", "monitoring_only": value,
+        })
+        await save(hass, flow_id)
+
+    # Cold lounge: normally heats
+    assert hass.states.get("climate.downstairs").attributes["hvac_action"] == "heating"
+
+    await set_monitoring(True)
+    assert entry.options["zones"]["downstairs"]["monitoring_only"] is True
+    zone = hass.states.get("climate.downstairs")
+    assert zone.attributes["hvac_action"] == "idle"
+    assert zone.attributes["monitoring_only"] is True
+    assert hass.states.get("climate.downstairs_lounge").attributes["hvac_action"] == "idle"
+    assert hass.states.get("climate.downstairs_lounge").attributes["current_temperature"] == 17.0
+    glob = hass.states.get("climate.heating_manager")
+    assert glob.attributes["hvac_action"] == "idle"
+    assert glob.attributes["current_temperature"] is None      # only zone is monitoring-only
+
+    await set_monitoring(False)
+    assert "monitoring_only" not in entry.options["zones"]["downstairs"]
+    assert hass.states.get("climate.downstairs").attributes["hvac_action"] == "heating"
+
+
+async def test_import_monitoring_only_from_yaml(hass, env, tmp_path):
+    text = LEGACY_YAML.replace("    heating_demand_mode: any_room\n", "    monitoring_only: true\n")
+    await setup_yaml(hass, tmp_path, text=text)
+    options = hass.config_entries.async_entries(DOMAIN)[0].options
+    assert options["zones"]["downstairs"]["monitoring_only"] is True
