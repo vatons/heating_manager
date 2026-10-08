@@ -19,10 +19,10 @@ from custom_components.heating_manager.const import DOMAIN
 
 from .conftest import ALL_DAY_19, FakeTRV, local_dt, make_room, set_temp
 
-ROOM = "climate.lounge_hm"
-ROOM_B = "climate.study_hm"
-ZONE = "climate.downstairs_zone_hm"
-GLOBAL = "climate.global_hm"
+ROOM = "climate.downstairs_lounge"
+ROOM_B = "climate.downstairs_study"
+ZONE = "climate.downstairs"
+GLOBAL = "climate.heating_manager"
 
 
 def write_config(tmp_path, zones=None, **top) -> str:
@@ -64,12 +64,18 @@ async def setup_hm(hass: HomeAssistant, add_trvs, tmp_path, freezer):
         return ok, trvs
 
     yield _setup
-    if DOMAIN in hass.data:
-        await hass.data[DOMAIN]["coordinator"].async_shutdown()
+    for config_entry in hass.config_entries.async_entries(DOMAIN):
+        await hass.config_entries.async_unload(config_entry.entry_id)
+
+
+def entry(hass):
+    entries = hass.config_entries.async_entries(DOMAIN)
+    assert len(entries) == 1
+    return entries[0]
 
 
 def coord(hass):
-    return hass.data[DOMAIN]["coordinator"]
+    return entry(hass).runtime_data
 
 
 async def refresh(hass):

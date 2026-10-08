@@ -15,7 +15,12 @@ from homeassistant.components.climate import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import (
+    config_validation as cv,
+    device_registry as dr,
+    entity_registry as er,
+)
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback, async_get_current_platform
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -32,35 +37,26 @@ from .coordinator import HeatingManagerCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_platform(
+async def async_setup_entry(
     hass: HomeAssistant,
-    config: dict,
+    entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
-    discovery_info: dict | None = None,
 ) -> None:
-    """Set up the climate platform."""
-    if DOMAIN not in hass.data or "coordinator" not in hass.data[DOMAIN]:
-        _LOGGER.error(
-            "Heating manager coordinator not found in hass.data. "
-            "Ensure the integration is configured in configuration.yaml before the climate platform loads."
-        )
-        return
-    coordinator: HeatingManagerCoordinator = hass.data[DOMAIN]["coordinator"]
+    """Set up climate entities from a config entry."""
+    coordinator: HeatingManagerCoordinator = entry.runtime_data
 
-    entities = []
-
-    # Create a climate entity for each room
+    entities: list[ClimateEntity] = [GlobalClimate(coordinator)]
     for zone_id, zone_data in coordinator.config.get("zones", {}).items():
-        rooms = zone_data.get("rooms", {})
-        for room_id, room_config in rooms.items():
+        if not isinstance(zone_data, dict):
+            continue
+        # Create a climate entity for each room
+        for room_id, room_config in zone_data.get("rooms", {}).items():
             entities.append(RoomClimate(coordinator, zone_id, room_id, room_config))
 
         # Create a zone climate entity for heating demand monitoring
         entities.append(ZoneClimate(coordinator, zone_id, zone_data))
 
-    # Create global climate entity for overall heating demand monitoring
-    entities.append(GlobalClimate(coordinator))
-
+    _async_remove_stale_entities(hass, entry, {e.unique_id for e in entities})
     async_add_entities(entities)
 
     # Register entity services
@@ -81,6 +77,50 @@ async def async_setup_platform(
         SERVICE_CLEAR_BOOST,
         {},
         "async_clear_boost_service",
+    )
+
+
+@callback
+def _async_remove_stale_entities(
+    hass: HomeAssistant, entry: ConfigEntry, unique_ids: set[str | None]
+) -> None:
+    """Remove entities and devices for zones/rooms deleted in the Configure menu."""
+    ent_reg = er.async_get(hass)
+    for entity in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+        if entity.unique_id not in unique_ids:
+            ent_reg.async_remove(entity.entity_id)
+
+    dev_reg = dr.async_get(hass)
+    zone_ids = set(entry.runtime_data.config.get("zones", {}))
+    for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
+        identifiers = {ident for domain, ident in device.identifiers if domain == DOMAIN}
+        if identifiers and not identifiers & ({GLOBAL_DEVICE_ID} | {_zone_device_id(z) for z in zone_ids}):
+            dev_reg.async_update_device(device.id, remove_config_entry_id=entry.entry_id)
+
+
+GLOBAL_DEVICE_ID = "global"
+
+
+def _zone_device_id(zone_id: str) -> str:
+    return f"zone_{zone_id}"
+
+
+def _zone_device_info(coordinator: HeatingManagerCoordinator, zone_id: str) -> DeviceInfo:
+    zone = coordinator.config.get("zones", {}).get(zone_id, {})
+    return DeviceInfo(
+        identifiers={(DOMAIN, _zone_device_id(zone_id))},
+        name=zone.get("name", zone_id),
+        manufacturer="Heating Manager",
+        model="Heating zone",
+    )
+
+
+def _global_device_info() -> DeviceInfo:
+    return DeviceInfo(
+        identifiers={(DOMAIN, GLOBAL_DEVICE_ID)},
+        name="Heating Manager",
+        manufacturer="Heating Manager",
+        model="Heating controller",
     )
 
 
@@ -107,8 +147,11 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         self._zone_id = zone_id
         self._room_id = room_id
         self._room_config = room_config
-        self._attr_name = f"{room_config.get('name', room_id)} (HM)"
+        # Named after the room, within the zone's device (e.g. "Downstairs Lounge")
+        self._attr_has_entity_name = True
+        self._attr_name = room_config.get("name", room_id)
         self._attr_unique_id = f"{DOMAIN}_{zone_id}_{room_id}"
+        self._attr_device_info = _zone_device_info(coordinator, zone_id)
 
     @property
     def current_temperature(self) -> float | None:
@@ -395,8 +438,11 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
 
         self._zone_id = zone_id
         self._zone_config = zone_config
-        self._attr_name = f"{zone_config.get('name', zone_id)} Zone (HM)"
+        # The zone's main entity: takes the zone device's name (e.g. "Downstairs")
+        self._attr_has_entity_name = True
+        self._attr_name = None
         self._attr_unique_id = f"{DOMAIN}_{zone_id}_zone"
+        self._attr_device_info = _zone_device_info(coordinator, zone_id)
 
     @property
     def current_temperature(self) -> float | None:
@@ -626,8 +672,11 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
         """Initialize the global climate entity."""
         super().__init__(coordinator)
 
-        self._attr_name = "Global (HM)"
+        # Takes the "Heating Manager" device name
+        self._attr_has_entity_name = True
+        self._attr_name = None
         self._attr_unique_id = f"{DOMAIN}_global"
+        self._attr_device_info = _global_device_info()
 
     @property
     def current_temperature(self) -> float | None:

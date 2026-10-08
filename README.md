@@ -53,109 +53,42 @@ A comprehensive Home Assistant custom component for managing multi-zone heating 
 1. Copy the `custom_components/heating_manager` directory to your Home Assistant's `custom_components` directory
 2. Restart Home Assistant
 
-## Configuration
+## Setup
 
-### 1. Create Your Heating Configuration File
+Everything is set up in the Home Assistant UI; no YAML is needed.
 
-Create a file named `heating_manager.yaml` in your Home Assistant configuration directory:
+1. Go to **Settings → Devices & services → Add integration** and choose **Heating Manager**.
+2. Name your first zone (an area served by one boiler or heating circuit, e.g. "Downstairs"). It starts with a 06:30–22:00 schedule at 19°C.
+3. Open the integration and click **Configure**. From the menu:
+   - **Zones, rooms and schedules**: pick a zone (or add one), then
+     - **Rooms**: add a room, pick its TRVs and temperature sensors, and optionally set a temperature offset
+     - **Schedule**: choose weekdays or weekends, then add, edit or delete periods (start, end, temperature). "Replace with the weekday/weekend schedule" copies one to the other
+     - **Name and heating demand mode**: rename the zone, or override the default demand mode for it
+   - **Settings**: the everyday options (temperature outside the schedule, away temperature, demand mode, sensor fallback, deadband, boost duration)
+   - **Advanced settings**: TRV control tuning, analytics and update interval. The defaults suit most homes
+4. Choose **Save and close** (available on the main menu, each zone's menu and every list) to apply your changes. Closing the dialog without saving discards them.
 
-```yaml
-# heating_manager.yaml
-update_interval: 60  # seconds between logic updates
-fallback_mode: "zone_average"  # or "trv" / "last_known"
-minimum_temp: 15  # Default temperature when no schedule is active (°C)
-frost_protection_temp: 15  # Temperature for away mode (°C)
-boost_duration: 30  # Default duration for room boost in minutes (default: 30)
-heating_demand_mode: "any_room"  # "any_room" or "zone_average" - How to calculate zone heating demand
-heating_deadband: 0.3  # Temperature difference before stopping heating (°C) - prevents short cycling
+Each zone appears as a device, with its room entities grouped under it.
 
-# TRV Intelligent Control (compensates for TRV internal sensors being near radiator)
-trv_overshoot_enabled: true  # Enable intelligent TRV setpoint calculation using sensor offset
-trv_overshoot_max: 5.0  # Maximum boost above learned offset (°C) - increase if rooms heat slowly
-trv_overshoot_threshold: 0.3  # Temperature above target to trigger cooling (°C)
-trv_cooldown_offset: 1.0  # Temperature below target to set for faster cooling (°C)
-trv_offset_ema_alpha: 0.15  # EMA smoothing factor (0.1=stable, 0.2=responsive)
+### Migrating from YAML
 
-# Heating Analytics (tracks temperature trends and estimates heating performance)
-analytics_enabled: true  # Enable heating analytics (default: true)
-analytics_history_size: 30  # Number of readings to keep per room (default: 30)
-analytics_min_samples: 3  # Minimum samples needed for calculations (default: 3)
-derivative_smoothing_factor: 0.3  # EMA smoothing for rate calculations (default: 0.3)
+If you used an earlier version configured with `heating_manager:` in `configuration.yaml`, just upgrade and restart. Your `heating_manager.yaml` is imported into the UI automatically, keeping your zones, rooms, schedules and settings, as well as your entity IDs, history, boosts, overrides and learned TRV offsets.
 
-zones:
-  downstairs:
-    name: "Downstairs Zone"
-    schedule:
-      weekday:
-        - { start: "06:00", end: "09:00", temperature: 21 }
-        - { start: "17:00", end: "22:00", temperature: 20 }
-      weekend:
-        - { start: "07:00", end: "23:00", temperature: 21 }
-    rooms:
-      living_room:
-        name: "Living Room"
-        trvs:
-          - climate.living_room_trv
-        sensors:
-          - sensor.living_room_temp
-          # Or with optional last_seen sensor:
-          # - temperature: sensor.living_room_temp
-          #   last_seen: sensor.living_room_last_seen
-      kitchen:
-        name: "Kitchen"
-        trvs:
-          - climate.kitchen_trv
-        sensors:
-          - sensor.kitchen_temp
-          - sensor.kitchen_secondary_temp
+After the import, Home Assistant shows a repair notice: remove the `heating_manager:` entry from `configuration.yaml`, delete `heating_manager.yaml` and restart. From then on, make changes with **Configure**; edits to the YAML are ignored.
 
-  upstairs:
-    name: "Upstairs Zone"
-    schedule:
-      weekday:
-        - { start: "06:30", end: "08:30", temperature: 20 }
-        - { start: "18:00", end: "22:30", temperature: 19.5 }
-      weekend:
-        - { start: "07:00", end: "23:00", temperature: 20 }
-    rooms:
-      bedroom:
-        name: "Bedroom"
-        temperature_offset: -2.0  # Keep bedroom 2°C cooler than zone temperature
-        trvs:
-          - climate.bedroom_trv
-        sensors:
-          - sensor.bedroom_temp
-      office:
-        name: "Office"
-        trvs:
-          - climate.office_trv
-        sensors:
-          - sensor.office_temp
-```
+### Entities
 
-### 2. Add to configuration.yaml
 
-Add the following to your `configuration.yaml`:
-
-```yaml
-heating_manager:
-  config_file: heating_manager.yaml
-```
-
-**Note:** All configuration options (`update_interval`, `minimum_temp`, `frost_protection_temp`, `fallback_mode`) should now be set in `heating_manager.yaml` (shown above). You can optionally override them in `configuration.yaml` for backward compatibility, but the recommended approach is to keep all settings in `heating_manager.yaml`.
-
-### 3. Restart Home Assistant
-
-After restarting, the integration will create the following entities:
+Entity IDs are based on names. Installs migrated from YAML keep their existing entity IDs.
 
 **Global:**
-- `climate.heating_manager_global` - Global climate entity showing combined heating demand across all zones
+- `climate.heating_manager` - Global climate entity showing combined heating demand across all zones
 
 **Per Zone:**
-- `climate.heating_manager_<zone_id>_zone` - Zone climate entity with manual temperature adjustment and heating demand status
+- `climate.<zone name>` (e.g. `climate.downstairs`) - Zone climate entity with manual temperature adjustment and heating demand status
 
 **Per Room:**
-- `climate.heating_manager_<zone_id>_<room_id>` - Room climate control entity
+- `climate.<zone name>_<room name>` (e.g. `climate.downstairs_lounge`) - Room climate control entity
 
   Structured attributes for better organization:
   - **Identification**:
@@ -213,7 +146,7 @@ data:
 ```
 
 **Check boost status:** All boost information is available in the room climate entity attributes:
-- `climate.heating_manager_downstairs_living_room` → attributes → `boost.temperature`, `boost.time_remaining_minutes`, etc.
+- `climate.downstairs_living_room` → attributes → `boost.temperature`, `boost.time_remaining_minutes`, etc.
 
 ### Heating Mode
 
@@ -237,7 +170,7 @@ data:
 
 ### Heating Demand
 
-Each zone climate entity (`climate.heating_manager_<zone_id>_zone`) exposes heating demand via its `hvac_action` attribute (`heating` or `idle`) and the `heating_demand` state attribute. This is useful for:
+Each zone climate entity (e.g. `climate.downstairs`) exposes heating demand via its `hvac_action` attribute (`heating` or `idle`) and the `heating_demand` state attribute. This is useful for:
 
 - **Triggering boilers/heating systems** when any room in the zone needs heat
 - **Controlling towel radiators** or other non-TRV radiators
@@ -257,18 +190,7 @@ You can configure how the zone heating demand is calculated using the `heating_d
 - Better for zones where rooms naturally vary in temperature
 - Prevents heating the whole zone for one cold room
 
-**Configuration:**
-
-```yaml
-# Global default (applies to all zones)
-heating_demand_mode: "any_room"
-
-zones:
-  downstairs:
-    name: "Downstairs"
-    heating_demand_mode: "zone_average"  # Override for this zone only
-    schedule: ...
-```
+**Configuration:** set the default in **Configure → Settings → Default heating demand mode**. To override it for one zone, use **Configure → Zones, rooms and schedules → (zone) → Name and heating demand mode**.
 
 The zone's `hvac_action` is `heating` based on the configured mode:
 - **any_room**: Any room temperature < target - deadband (smart logic applied per room)
@@ -281,7 +203,7 @@ automation:
   - alias: "Turn on Downstairs Heating"
     trigger:
       - platform: state
-        entity_id: climate.heating_manager_downstairs_zone
+        entity_id: climate.downstairs
         attribute: hvac_action
         to: "heating"
     action:
@@ -292,7 +214,7 @@ automation:
   - alias: "Turn off Downstairs Heating"
     trigger:
       - platform: state
-        entity_id: climate.heating_manager_downstairs_zone
+        entity_id: climate.downstairs
         attribute: hvac_action
         to: "idle"
         for: "00:05:00"  # 5 minute delay to prevent short cycling
@@ -316,7 +238,7 @@ The zone climate entity attributes include:
 
 ### Global Heating Demand
 
-The global climate entity (`climate.heating_manager_global`) combines ALL zones using OR logic. Its `hvac_action` is `heating` when ANY zone requires heating.
+The global climate entity (`climate.heating_manager`) combines ALL zones using OR logic. Its `hvac_action` is `heating` when ANY zone requires heating.
 
 This is particularly useful for:
 - **Controlling a main boiler** that serves multiple zones
@@ -330,7 +252,7 @@ automation:
   - alias: "Turn on Main Boiler"
     trigger:
       - platform: state
-        entity_id: climate.heating_manager_global
+        entity_id: climate.heating_manager
         attribute: hvac_action
         to: "heating"
     action:
@@ -341,7 +263,7 @@ automation:
   - alias: "Turn off Main Boiler"
     trigger:
       - platform: state
-        entity_id: climate.heating_manager_global
+        entity_id: climate.heating_manager
         attribute: hvac_action
         to: "idle"
         for: "00:05:00"  # 5 minute delay to prevent short cycling
@@ -374,27 +296,13 @@ The global climate entity attributes include:
 
 ### Temperature Sensor Configuration
 
-Sensors can be configured in two formats:
+Pick a room's temperature sensors in its room form (**Configure → Zones, rooms and schedules → (zone) → Rooms → (room)**). Several sensors in one room are averaged.
 
-**Simple format** (uses Home Assistant's state.last_updated):
-```yaml
-sensors:
-  - sensor.living_room_temp
-  - sensor.kitchen_temp
-```
-
-**Extended format** (with optional dedicated last_seen sensor):
-```yaml
-sensors:
-  - temperature: sensor.living_room_temp
-    last_seen: sensor.living_room_last_seen  # Optional: ISO datetime sensor
-  - temperature: sensor.kitchen_temp  # No last_seen, uses state.last_updated
-```
+A sensor counts as fresh if it reported within the last 30 minutes, using Home Assistant's own report time, so a sensor holding a steady temperature is still fresh. For sensors that expose a separate timestamp entity (for example Zigbee2MQTT's `last_seen`), tick **Set 'last seen' sensors** in the room form to map each sensor to it.
 
 **Benefits of dedicated last_seen sensors:**
 - More accurate timestamps for battery-powered sensors
 - Reflects when sensor actually measured (not when HA received update)
-- Better timeout detection for sensors with irregular update patterns
 
 **Last seen sensor format:** ISO 8601 datetime string: `YYYY-MM-DDTHH:MM:SS+00:00`
 
@@ -431,25 +339,7 @@ The system automatically uses the most accurate timestamp available and indicate
 
 You can configure individual temperature adjustments for specific rooms within a zone using the `temperature_offset` parameter. This allows you to maintain different comfort levels in different rooms while keeping them all on the same heating schedule.
 
-**Configuration:**
-```yaml
-rooms:
-  bedroom:
-    name: "Bedroom"
-    temperature_offset: -2.0  # This room will target 2°C below zone temperature
-    trvs:
-      - climate.bedroom_trv
-    sensors:
-      - sensor.bedroom_temp
-
-  office:
-    name: "Office"
-    temperature_offset: 1.5  # This room will target 1.5°C above zone temperature
-    trvs:
-      - climate.office_trv
-    sensors:
-      - sensor.office_temp
-```
+**Configuration:** set **Temperature offset** in the room's form (**Configure → Zones, rooms and schedules → (zone) → Rooms → (room)**).
 
 **How it works:**
 
@@ -492,7 +382,7 @@ automation:
     action:
       - service: heating_manager.set_boost
         target:
-          entity_id: climate.heating_manager_downstairs_living_room
+          entity_id: climate.downstairs_living_room
         data:
           duration: 120
           temperature: 22
@@ -543,7 +433,7 @@ automation:
     action:
       - service: heating_manager.set_boost
         target:
-          entity_id: climate.heating_manager_upstairs_bedroom
+          entity_id: climate.upstairs_bedroom
         data:
           duration: 30
 ```
@@ -557,8 +447,8 @@ template:
   - sensor:
       - name: "Living Room Boost Status"
         state: >
-          {% if state_attr('climate.heating_manager_downstairs_living_room', 'boost')['temperature'] %}
-            Boost active: {{ state_attr('climate.heating_manager_downstairs_living_room', 'boost')['time_remaining_minutes'] }} min remaining
+          {% if state_attr('climate.downstairs_living_room', 'boost')['temperature'] %}
+            Boost active: {{ state_attr('climate.downstairs_living_room', 'boost')['time_remaining_minutes'] }} min remaining
           {% else %}
             Not boosted
           {% endif %}
@@ -609,10 +499,7 @@ The `heating_deadband` parameter controls how much the temperature must drop bel
    - Target reached, within deadband → No heating
    - Prevents cycling for small fluctuations
 
-**Configuration:**
-```yaml
-heating_deadband: 0.3  # Default: 0.3°C, adjust based on your system
-```
+**Configuration:** **Configure → Settings → Heating deadband** (default 0.3°C).
 
 Lower values (0.2°C) = More precise temperature control, more frequent cycling
 Higher values (0.5°C) = Less cycling, more temperature variation
@@ -681,14 +568,15 @@ The system uses an **Exponential Moving Average (EMA)** for efficient, adaptive 
 
 #### Configuration
 
-```yaml
-# TRV Intelligent Control
-trv_overshoot_enabled: true        # Enable/disable intelligent control (default: true)
-trv_overshoot_max: 5.0             # Maximum boost above offset (°C) (default: 5.0)
-trv_overshoot_threshold: 0.3       # Temp above target to trigger cooling (default: 0.3)
-trv_cooldown_offset: 1.0           # Temp below target for faster cooling (default: 1.0)
-trv_offset_ema_alpha: 0.15         # EMA smoothing factor (default: 0.15)
-```
+Set under **Configure → Advanced settings**:
+
+| Setting | Former YAML key | Default |
+|---|---|---|
+| Smart TRV control | `trv_overshoot_enabled` | on |
+| Maximum TRV boost | `trv_overshoot_max` | 5.0°C |
+| Overshoot threshold | `trv_overshoot_threshold` | 0.3°C |
+| Cooldown offset | `trv_cooldown_offset` | 1.0°C |
+| TRV offset learning rate | `trv_offset_ema_alpha` | 0.15 |
 
 **Tuning Guide:**
 - **Rooms heat too slowly?** Increase `trv_overshoot_max` to 6-7°C
@@ -722,13 +610,7 @@ The integration includes an optional heating analytics system that tracks temper
 - **Confidence Scoring**: Indicates reliability of predictions (0.0-1.0)
 - **Trend Analysis**: Categorizes heating behavior (heating_rapidly, heating_slowly, stable, cooling_slowly, cooling_rapidly, insufficient_data)
 
-**Configuration:**
-```yaml
-analytics_enabled: true  # Enable heating analytics (default: true)
-analytics_history_size: 30  # Number of readings to keep per room (default: 30)
-analytics_min_samples: 3  # Minimum samples needed for calculations (default: 3)
-derivative_smoothing_factor: 0.3  # EMA smoothing for rate calculations (default: 0.3)
-```
+**Configuration:** **Configure → Advanced settings**: Heating analytics (on), Analytics history size (30 readings), Analytics minimum samples (3) and Analytics smoothing (0.3).
 
 **Analytics data is available in room climate entity attributes:**
 ```yaml
@@ -750,10 +632,7 @@ heating_analytics:
 - Display estimated time to reach target in UI dashboards
 
 **Disabling analytics:**
-If you don't need this feature, you can disable it to reduce storage and processing:
-```yaml
-analytics_enabled: false
-```
+If you don't need this feature, turn off **Heating analytics** in **Configure → Advanced settings** to reduce storage and processing.
 
 ### Heating Demand Modes
 
@@ -767,11 +646,11 @@ Control how zone heating demand is calculated:
   - Best for: Energy efficiency, zones with natural temperature variation
   - Trade-off: Individual cold rooms may not trigger heating immediately
 
-Can be set globally or overridden per-zone in `heating_manager.yaml`.
+Set the default in **Configure → Settings**; override it per zone in the zone's **Name and heating demand mode** screen.
 
 ### Fallback Modes
 
-Used when a room has no sensor reading from the last 30 minutes, or has no sensors configured:
+Set in **Configure → Settings → When a room's sensors are unavailable**. Used when a room has no sensor reading from the last 30 minutes, or has no sensors configured:
 
 - `zone_average`: Use the average of the zone's other fresh sensors (default, recommended)
 - `trv`: Use the average internal temperature of the room's TRVs. These usually read warmer than the room
@@ -781,12 +660,11 @@ If `trv` or `last_known` has no data, the zone average is used. TRV offsets are 
 
 ### Schedule Time Format
 
-- Use 24-hour format: "HH:MM" (quoted or unquoted; "6:30" and "06:30" are both fine)
-- `end` is exclusive; use "24:00" or "00:00" to run until midnight
+- Periods are edited with time pickers in **Configure → Zones, rooms and schedules → (zone) → Schedule**
+- `end` is exclusive; use 00:00 to run until midnight
 - A period with the same start and end (e.g. "00:00" to "00:00") covers the whole day
 - A period ending before it starts (e.g. "22:00" to "06:00") spans midnight
-- Ensure times don't overlap; if they do, the first matching period wins
-- Periods with invalid times are ignored and a warning is logged
+- Periods on the same day can't overlap
 - When no schedule is active, uses `minimum_temp` setting
 
 ## Development

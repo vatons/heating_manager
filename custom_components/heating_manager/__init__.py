@@ -1,15 +1,22 @@
-"""The Heating Manager integration."""
+"""The Heating Manager integration.
+
+Set up from the UI (config entry). A legacy `heating_manager:` block in
+configuration.yaml is imported into a config entry once, after which the UI is
+the source of truth and a repair notice asks for the YAML to be removed.
+"""
+from __future__ import annotations
+
 import logging
 import os
-from datetime import timedelta
 
-import yaml
 import voluptuous as vol
-from homeassistant.config_entries import ConfigEntry
+import yaml
+
+from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.discovery import async_load_platform
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import config_validation as cv, issue_registry as ir
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
@@ -30,84 +37,42 @@ from .const import (
     CONF_TRV_OVERSHOOT_MAX,
     CONF_TRV_OVERSHOOT_THRESHOLD,
     CONF_UPDATE_INTERVAL,
-    DEFAULT_ANALYTICS_ENABLED,
-    DEFAULT_ANALYTICS_HISTORY_SIZE,
-    DEFAULT_ANALYTICS_MIN_SAMPLES,
-    DEFAULT_BOOST_DURATION,
-    DEFAULT_DERIVATIVE_SMOOTHING,
-    DEFAULT_FALLBACK_MODE,
-    DEFAULT_FROST_PROTECTION_TEMP,
-    DEFAULT_HEATING_DEADBAND,
-    DEFAULT_MINIMUM_TEMP,
-    DEFAULT_TRV_COOLDOWN_OFFSET,
-    DEFAULT_TRV_OFFSET_EMA_ALPHA,
-    DEFAULT_TRV_OVERSHOOT_ENABLED,
-    DEFAULT_TRV_OVERSHOOT_MAX,
-    DEFAULT_TRV_OVERSHOOT_THRESHOLD,
-    DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     SERVICE_SET_MODE,
 )
 from .coordinator import HeatingManagerCoordinator
+from .entry_data import options_to_runtime, yaml_to_options
 
 _LOGGER = logging.getLogger(__name__)
 
-# This integration uses YAML-based discovery (async_load_platform) rather than
-# config entries. PLATFORMS is not used for platform forwarding here; it is
-# retained only for potential future migration to config-entry setup.
 PLATFORMS = [Platform.CLIMATE]
 
+type HeatingManagerConfigEntry = ConfigEntry[HeatingManagerCoordinator]
+
+# Legacy YAML: only used to import into a config entry. Settings are optional
+# here; anything not given falls back to heating_manager.yaml, then defaults.
 CONFIG_SCHEMA = vol.Schema(
     {
         DOMAIN: vol.Schema(
             {
                 vol.Required(CONF_CONFIG_FILE): cv.string,
-                vol.Optional(
-                    CONF_UPDATE_INTERVAL, default=DEFAULT_UPDATE_INTERVAL
-                ): cv.positive_int,
-                vol.Optional(
-                    CONF_MINIMUM_TEMP, default=DEFAULT_MINIMUM_TEMP
-                ): vol.All(vol.Coerce(float), vol.Range(min=5.0, max=30.0)),
-                vol.Optional(
-                    CONF_FROST_PROTECTION_TEMP, default=DEFAULT_FROST_PROTECTION_TEMP
-                ): vol.All(vol.Coerce(float), vol.Range(min=1.0, max=15.0)),
-                vol.Optional(
-                    CONF_FALLBACK_MODE, default=DEFAULT_FALLBACK_MODE
-                ): cv.string,
-                vol.Optional(
-                    CONF_BOOST_DURATION, default=DEFAULT_BOOST_DURATION
-                ): cv.positive_int,
-                vol.Optional(
-                    CONF_HEATING_DEADBAND, default=DEFAULT_HEATING_DEADBAND
-                ): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=5.0)),
-                vol.Optional(
-                    CONF_TRV_OVERSHOOT_ENABLED, default=DEFAULT_TRV_OVERSHOOT_ENABLED
-                ): cv.boolean,
-                vol.Optional(
-                    CONF_TRV_OVERSHOOT_MAX, default=DEFAULT_TRV_OVERSHOOT_MAX
-                ): vol.Coerce(float),
-                vol.Optional(
-                    CONF_TRV_OVERSHOOT_THRESHOLD, default=DEFAULT_TRV_OVERSHOOT_THRESHOLD
-                ): vol.Coerce(float),
-                vol.Optional(
-                    CONF_TRV_COOLDOWN_OFFSET, default=DEFAULT_TRV_COOLDOWN_OFFSET
-                ): vol.Coerce(float),
-                vol.Optional(
-                    CONF_TRV_OFFSET_EMA_ALPHA, default=DEFAULT_TRV_OFFSET_EMA_ALPHA
-                ): vol.Coerce(float),
-                vol.Optional(
-                    CONF_ANALYTICS_ENABLED, default=DEFAULT_ANALYTICS_ENABLED
-                ): cv.boolean,
-                vol.Optional(
-                    CONF_ANALYTICS_HISTORY_SIZE, default=DEFAULT_ANALYTICS_HISTORY_SIZE
-                ): cv.positive_int,
-                vol.Optional(
-                    CONF_ANALYTICS_MIN_SAMPLES, default=DEFAULT_ANALYTICS_MIN_SAMPLES
-                ): cv.positive_int,
-                vol.Optional(
-                    CONF_DERIVATIVE_SMOOTHING, default=DEFAULT_DERIVATIVE_SMOOTHING
-                ): vol.Coerce(float),
-            }
+                vol.Optional(CONF_UPDATE_INTERVAL): cv.positive_int,
+                vol.Optional(CONF_MINIMUM_TEMP): vol.Coerce(float),
+                vol.Optional(CONF_FROST_PROTECTION_TEMP): vol.Coerce(float),
+                vol.Optional(CONF_FALLBACK_MODE): cv.string,
+                vol.Optional(CONF_BOOST_DURATION): cv.positive_int,
+                vol.Optional(CONF_HEATING_DEADBAND): vol.Coerce(float),
+                vol.Optional(CONF_TRV_OVERSHOOT_ENABLED): cv.boolean,
+                vol.Optional(CONF_TRV_OVERSHOOT_MAX): vol.Coerce(float),
+                vol.Optional(CONF_TRV_OVERSHOOT_THRESHOLD): vol.Coerce(float),
+                vol.Optional(CONF_TRV_COOLDOWN_OFFSET): vol.Coerce(float),
+                vol.Optional(CONF_TRV_OFFSET_EMA_ALPHA): vol.Coerce(float),
+                vol.Optional(CONF_ANALYTICS_ENABLED): cv.boolean,
+                vol.Optional(CONF_ANALYTICS_HISTORY_SIZE): cv.positive_int,
+                vol.Optional(CONF_ANALYTICS_MIN_SAMPLES): cv.positive_int,
+                vol.Optional(CONF_DERIVATIVE_SMOOTHING): vol.Coerce(float),
+            },
+            extra=vol.ALLOW_EXTRA,
         )
     },
     extra=vol.ALLOW_EXTRA,
@@ -121,19 +86,35 @@ SERVICE_SET_MODE_SCHEMA = vol.Schema(
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Set up the Heating Manager component."""
-    if DOMAIN not in config:
-        return True
+    """Register services and import legacy YAML configuration."""
 
-    conf = config[DOMAIN]
+    async def handle_set_mode(call: ServiceCall) -> None:
+        """Handle the set_mode service call."""
+        entries = [
+            entry
+            for entry in hass.config_entries.async_entries(DOMAIN)
+            if entry.state is ConfigEntryState.LOADED
+        ]
+        if not entries:
+            raise ServiceValidationError("Heating Manager is not set up")
+        coordinator: HeatingManagerCoordinator = entries[0].runtime_data
+        await coordinator.set_away_mode(call.data[ATTR_MODE] == "away")
 
-    # Load the heating manager config file
+    hass.services.async_register(
+        DOMAIN, SERVICE_SET_MODE, handle_set_mode, schema=SERVICE_SET_MODE_SCHEMA
+    )
+
+    if DOMAIN in config:
+        return await _async_import_yaml(hass, config[DOMAIN])
+    return True
+
+
+async def _async_import_yaml(hass: HomeAssistant, conf: dict) -> bool:
     config_file = conf[CONF_CONFIG_FILE]
     if not os.path.isabs(config_file):
         config_file = hass.config.path(config_file)
 
     def load_config():
-        """Load config file synchronously."""
         with open(config_file, "r") as f:
             return yaml.safe_load(f)
 
@@ -146,142 +127,77 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         _LOGGER.error("Error parsing heating manager config: %s", err)
         return False
 
-    # Read values from heating_manager.yaml, with fallback to configuration.yaml, then defaults
-    update_interval = heating_config.get(
-        CONF_UPDATE_INTERVAL,
-        conf.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)
-    )
-    minimum_temp = heating_config.get(
-        CONF_MINIMUM_TEMP,
-        conf.get(CONF_MINIMUM_TEMP, DEFAULT_MINIMUM_TEMP)
-    )
-    frost_protection_temp = heating_config.get(
-        CONF_FROST_PROTECTION_TEMP,
-        conf.get(CONF_FROST_PROTECTION_TEMP, DEFAULT_FROST_PROTECTION_TEMP)
-    )
-    fallback_mode = heating_config.get(
-        CONF_FALLBACK_MODE,
-        conf.get(CONF_FALLBACK_MODE, DEFAULT_FALLBACK_MODE)
-    )
-    boost_duration = heating_config.get(
-        CONF_BOOST_DURATION,
-        conf.get(CONF_BOOST_DURATION, DEFAULT_BOOST_DURATION)
-    )
-    heating_deadband = heating_config.get(
-        CONF_HEATING_DEADBAND,
-        conf.get(CONF_HEATING_DEADBAND, DEFAULT_HEATING_DEADBAND)
-    )
-    trv_overshoot_enabled = heating_config.get(
-        CONF_TRV_OVERSHOOT_ENABLED,
-        conf.get(CONF_TRV_OVERSHOOT_ENABLED, DEFAULT_TRV_OVERSHOOT_ENABLED)
-    )
-    trv_overshoot_max = heating_config.get(
-        CONF_TRV_OVERSHOOT_MAX,
-        conf.get(CONF_TRV_OVERSHOOT_MAX, DEFAULT_TRV_OVERSHOOT_MAX)
-    )
-    trv_overshoot_threshold = heating_config.get(
-        CONF_TRV_OVERSHOOT_THRESHOLD,
-        conf.get(CONF_TRV_OVERSHOOT_THRESHOLD, DEFAULT_TRV_OVERSHOOT_THRESHOLD)
-    )
-    trv_cooldown_offset = heating_config.get(
-        CONF_TRV_COOLDOWN_OFFSET,
-        conf.get(CONF_TRV_COOLDOWN_OFFSET, DEFAULT_TRV_COOLDOWN_OFFSET)
-    )
-    trv_offset_ema_alpha = heating_config.get(
-        CONF_TRV_OFFSET_EMA_ALPHA,
-        conf.get(CONF_TRV_OFFSET_EMA_ALPHA, DEFAULT_TRV_OFFSET_EMA_ALPHA)
-    )
-    analytics_enabled = heating_config.get(
-        CONF_ANALYTICS_ENABLED,
-        conf.get(CONF_ANALYTICS_ENABLED, DEFAULT_ANALYTICS_ENABLED)
-    )
-    analytics_history_size = heating_config.get(
-        CONF_ANALYTICS_HISTORY_SIZE,
-        conf.get(CONF_ANALYTICS_HISTORY_SIZE, DEFAULT_ANALYTICS_HISTORY_SIZE)
-    )
-    analytics_min_samples = heating_config.get(
-        CONF_ANALYTICS_MIN_SAMPLES,
-        conf.get(CONF_ANALYTICS_MIN_SAMPLES, DEFAULT_ANALYTICS_MIN_SAMPLES)
-    )
-    derivative_smoothing = heating_config.get(
-        CONF_DERIVATIVE_SMOOTHING,
-        conf.get(CONF_DERIVATIVE_SMOOTHING, DEFAULT_DERIVATIVE_SMOOTHING)
+    if not isinstance(heating_config, dict):
+        _LOGGER.error("Heating manager config file %s is empty or not a mapping", config_file)
+        return False
+
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        "yaml_imported",
+        is_fixable=False,
+        is_persistent=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key="yaml_imported",
+        translation_placeholders={"config_file": config_file},
     )
 
-    # Create coordinator
+    if hass.config_entries.async_entries(DOMAIN):
+        # Already imported: the UI is the source of truth now
+        return True
+
+    hass.async_create_task(
+        hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_IMPORT},
+            data=yaml_to_options(heating_config, conf),
+        )
+    )
+    return True
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: HeatingManagerConfigEntry) -> bool:
+    """Set up Heating Manager from a config entry."""
+    config, settings = options_to_runtime(dict(entry.options))
+
     coordinator = HeatingManagerCoordinator(
         hass,
-        heating_config,
-        update_interval,
-        minimum_temp,
-        frost_protection_temp,
-        fallback_mode,
-        boost_duration,
-        heating_deadband,
-        trv_overshoot_enabled,
-        trv_overshoot_max,
-        trv_overshoot_threshold,
-        trv_cooldown_offset,
-        trv_offset_ema_alpha,
-        analytics_enabled,
-        analytics_history_size,
-        analytics_min_samples,
-        derivative_smoothing,
+        config,
+        update_interval=settings[CONF_UPDATE_INTERVAL],
+        minimum_temp=settings[CONF_MINIMUM_TEMP],
+        frost_protection_temp=settings[CONF_FROST_PROTECTION_TEMP],
+        fallback_mode=settings[CONF_FALLBACK_MODE],
+        boost_duration=settings[CONF_BOOST_DURATION],
+        heating_deadband=settings[CONF_HEATING_DEADBAND],
+        trv_overshoot_enabled=settings[CONF_TRV_OVERSHOOT_ENABLED],
+        trv_overshoot_max=settings[CONF_TRV_OVERSHOOT_MAX],
+        trv_overshoot_threshold=settings[CONF_TRV_OVERSHOOT_THRESHOLD],
+        trv_cooldown_offset=settings[CONF_TRV_COOLDOWN_OFFSET],
+        trv_offset_ema_alpha=settings[CONF_TRV_OFFSET_EMA_ALPHA],
+        analytics_enabled=settings[CONF_ANALYTICS_ENABLED],
+        analytics_history_size=settings[CONF_ANALYTICS_HISTORY_SIZE],
+        analytics_min_samples=settings[CONF_ANALYTICS_MIN_SAMPLES],
+        derivative_smoothing=settings[CONF_DERIVATIVE_SMOOTHING],
+        config_entry=entry,
     )
+    await coordinator.async_config_entry_first_refresh()
+    entry.runtime_data = coordinator
 
-    # Ensure first update completes before entities are created
-    try:
-        await coordinator.async_refresh()
-        if not coordinator.data:
-            _LOGGER.warning(
-                "Coordinator first refresh completed but no data available. "
-                "Entities may not have target temperatures until next update."
-            )
-    except Exception as err:
-        _LOGGER.error(
-            "Failed to perform initial coordinator refresh: %s. "
-            "Heating manager may not work correctly until next update.",
-            err,
-        )
-
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN]["coordinator"] = coordinator
-
-    # Load platforms using discovery; await so entities exist before async_setup returns.
-    for platform in PLATFORMS:
-        await async_load_platform(hass, platform, DOMAIN, {}, config)
-
-    # Register global services
-    async def handle_set_mode(call: ServiceCall) -> None:
-        """Handle the set_mode service call."""
-        mode = call.data[ATTR_MODE]
-        if mode == "away":
-            await coordinator.set_away_mode(True)
-        elif mode == "schedule":
-            await coordinator.set_away_mode(False)
-
-    hass.services.async_register(
-        DOMAIN, SERVICE_SET_MODE, handle_set_mode, schema=SERVICE_SET_MODE_SCHEMA
-    )
-
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up from a config entry."""
-    return True
+async def _async_reload_entry(hass: HomeAssistant, entry: HeatingManagerConfigEntry) -> None:
+    """Apply changes made in the Configure menu."""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry.
-
-    This integration is configured via YAML (async_setup), not config entries.
-    async_unload_entry should not be reached in normal operation; guard against
-    it destroying the YAML-managed coordinator and services.
-    """
-    _LOGGER.warning(
-        "async_unload_entry called for %s, but this integration uses YAML setup. "
-        "Skipping teardown to avoid disrupting the running heating manager.",
-        DOMAIN,
-    )
-    return True
+async def async_unload_entry(hass: HomeAssistant, entry: HeatingManagerConfigEntry) -> bool:
+    """Unload a config entry, saving learned state first."""
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded:
+        coordinator = entry.runtime_data
+        await coordinator.async_shutdown()
+        await coordinator.async_save_state()
+    return unloaded

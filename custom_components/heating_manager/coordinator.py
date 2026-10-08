@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import logging
 from typing import Any
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
@@ -31,6 +32,8 @@ from .trv_controller import TRVController
 from .trv_manager import TRVManager
 
 _LOGGER = logging.getLogger(__name__)
+
+STATE_SAVE_DELAY = 300  # seconds; learned state is written at most this often
 
 
 class _HeatingManagerStore(Store):
@@ -75,11 +78,13 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         analytics_history_size: int,
         analytics_min_samples: int,
         derivative_smoothing: float,
+        config_entry: ConfigEntry | None = None,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=config_entry,
             name=DOMAIN,
             update_interval=timedelta(seconds=update_interval),
         )
@@ -398,6 +403,11 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
 
             if _state_changed:
                 await self._save_state()
+            else:
+                # Learned TRV offsets, heating state and analytics change every
+                # update; persist them periodically (and on shutdown) so they
+                # survive restarts.
+                self._store.async_delay_save(self._state_data, STATE_SAVE_DELAY)
 
             return result
 
@@ -694,8 +704,16 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 analytics_history = data.get("analytics_history", {})
                 self.heating_analytics.restore_history(analytics_history)
 
+    async def async_save_state(self) -> None:
+        """Save persistent state to storage now."""
+        await self._save_state()
+
     async def _save_state(self) -> None:
         """Save persistent state to storage."""
+        await self._store.async_save(self._state_data())
+
+    def _state_data(self) -> dict:
+        """Build the persistent state."""
         data = {
             "version": STORAGE_VERSION,
             "away_mode": self.away_mode,
@@ -711,4 +729,4 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         if self.heating_analytics is not None:
             data["analytics_history"] = self.heating_analytics.get_history_for_storage()
 
-        await self._store.async_save(data)
+        return data

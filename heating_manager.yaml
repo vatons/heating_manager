@@ -1,4 +1,6 @@
 # heating_manager.yaml
+# Legacy configuration format. Heating Manager is now set up in the UI; a file like
+# this is only read once, to import an existing setup (see README: Migrating from YAML).
 update_interval: 60 # seconds between logic updates
 fallback_mode: "zone_average" # or "trv" / "last_known"
 minimum_temp: 17 # Default temperature when no schedule is active (°C)
