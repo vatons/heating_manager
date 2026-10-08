@@ -378,6 +378,25 @@ class TRVController:
             # them visible: an undelivered setpoint means the TRV is uncontrolled.
             _LOGGER.error("Error setting TRV %s temperature: %s", trv_id, err)
 
+    async def set_trv_setpoint(self, trv_id: str, setpoint: float) -> bool:
+        """Send a fixed setpoint to a TRV, fitted to its limits.
+
+        Errors are logged rather than raised, so one unreachable TRV cannot
+        break the caller. Returns True if the command was delivered.
+        """
+        setpoint = self._apply_trv_limits(trv_id, self.hass.states.get(trv_id), setpoint)
+        try:
+            await self.hass.services.async_call(
+                "climate",
+                "set_temperature",
+                {"entity_id": trv_id, "temperature": setpoint},
+                blocking=True,
+            )
+        except Exception as err:
+            _LOGGER.error("Error setting TRV %s temperature: %s", trv_id, err)
+            return False
+        return True
+
     @staticmethod
     def _apply_trv_limits(trv_id: str, trv_state: Any, setpoint: float) -> float:
         """Round a setpoint to the TRV's step and clamp it to its min/max range."""

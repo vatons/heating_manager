@@ -98,11 +98,6 @@ def test_restore_skips_corrupt_entries(ha_):
     assert len(ha_.temp_history["z"]["r"]) == 1
 
 
-@pytest.mark.xfail(
-    raises=KeyError,
-    reason="BUG (robustness): restored empty smoothed_rates raises KeyError, which "
-    "would fail every coordinator update",
-)
 def test_restore_without_smoothed_rates_then_analytics(ha_):
     """Older storage may lack smoothed_rates; analytics must still work afterwards."""
     ha_.restore_history({"z": {"r": {"history": []}}})

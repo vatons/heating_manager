@@ -378,7 +378,11 @@ class HeatingAnalytics:
                             err,
                         )
 
-                # Restore smoothed rates
-                self.smoothed_rates[zone_id][room_id] = room_data.get("smoothed_rates", {})
+                # Restore smoothed rates (older storage may lack them or be partial)
+                stored_rates = room_data.get("smoothed_rates") or {}
+                self.smoothed_rates[zone_id][room_id] = {
+                    "heating_rate": stored_rates.get("heating_rate"),
+                    "cooling_rate": stored_rates.get("cooling_rate"),
+                }
 
         _LOGGER.info("Restored temperature history for %d zones", len(stored_data))

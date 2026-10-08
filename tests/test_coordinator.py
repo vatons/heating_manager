@@ -340,10 +340,6 @@ async def test_watchdog_sets_trvs_low_and_clears_overrides(hass, basic, _frozen)
     assert coordinator.boost_manager.boost_state == {}
 
 
-@pytest.mark.xfail(
-    reason="BUG: watchdog TRV calls are unprotected; one failing TRV fails the whole "
-    "update, every cycle, freezing the boiler demand at its last value"
-)
 async def test_watchdog_survives_failing_trv(hass, add_trvs, make_coordinator, _frozen):
     trvs = await add_trvs(FakeTRV("room_trv", current_temperature=17.0), FakeTRV("bad_trv"))
     set_temp(hass, SENSOR, 17.0)
@@ -351,6 +347,7 @@ async def test_watchdog_survives_failing_trv(hass, add_trvs, make_coordinator, _
     trvs["climate.bad_trv"].fail_with = HomeAssistantError("zigbee timeout")
     await run_until_watchdog(hass, coordinator, _frozen)
     assert coordinator.last_update_success
+    assert trvs[TRV].target_temperature == coordinator.minimum_temp
 
 
 # ---------------------------------------------------------------------------
