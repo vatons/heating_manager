@@ -324,21 +324,55 @@ def legacy_unique_id_map(zones: dict) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Subentries: one per zone and one per room
+# Subentries: one per zone, holding its rooms
 # ---------------------------------------------------------------------------
+# Each zone is a subentry whose data includes its rooms, so the integration
+# page shows every zone as one card with its room devices inside it.
 
 SUBENTRY_ZONE = "zone"
-SUBENTRY_ROOM = "room"
+SUBENTRY_ROOM = "room"          # 3.0/3.1 only: rooms were subentries of their own
 CONF_ZONE_ID = "zone_id"
 CONF_ROOM_ID = "room_id"
 CONF_WEEKEND_SAME = "weekend_same_as_weekday"
+# Kept on a room after a migration so its old unique ids still map to it
+ROOM_HISTORY_KEYS = ("previous_room_id", "previous_zone_id")
 
 
-def room_title(room_name: str, zone_name: str) -> str:
-    return f"{room_name} ({zone_name})"
+def _count(number: int, singular: str, plural: str) -> str:
+    return f"{number} {singular if number == 1 else plural}"
 
 
-def zone_subentry(zone_id: str, zone: dict) -> dict[str, Any]:
+def room_label_for(room_name: str, zone_name: str) -> str:
+    """"Downstairs › Lounge": names a room in messages."""
+    return f"{zone_name} › {room_name}"
+
+
+def zone_title(zone: dict) -> str:
+    """"Downstairs · 3 rooms" (plus "monitoring only")."""
+    rooms = len(zone.get(CONF_ROOMS) or [])
+    parts = [zone.get("name", ""), _count(rooms, "room", "rooms") if rooms else "no rooms"]
+    if zone.get(CONF_MONITORING_ONLY):
+        parts.append("monitoring only")
+    return " · ".join(parts)
+
+
+def stored_room(room_id: str, room: dict, **extra) -> dict[str, Any]:
+    """A room as stored in its zone's subentry data."""
+    data: dict[str, Any] = {
+        CONF_ROOM_ID: room_id,
+        "name": room.get("name", room_id),
+        CONF_TRVS: list(room.get(CONF_TRVS) or []),
+        CONF_SENSORS: [dict(s) for s in room.get(CONF_SENSORS) or []],
+    }
+    if room.get(CONF_TEMPERATURE_OFFSET):
+        data[CONF_TEMPERATURE_OFFSET] = float(room[CONF_TEMPERATURE_OFFSET])
+    for key in ROOM_HISTORY_KEYS:
+        if value := extra.get(key, room.get(key)):
+            data[key] = value
+    return data
+
+
+def zone_subentry(zone_id: str, zone: dict, rooms: list[dict] | None = None) -> dict[str, Any]:
     """ConfigSubentryData for a zone (from the options/YAML zone structure)."""
     schedule = zone.get(CONF_SCHEDULE) or {}
     weekday = list(schedule.get(CONF_WEEKDAY) or [])
@@ -348,36 +382,17 @@ def zone_subentry(zone_id: str, zone: dict) -> dict[str, Any]:
         "name": zone.get("name", zone_id),
         CONF_SCHEDULE: {CONF_WEEKDAY: weekday, CONF_WEEKEND: weekend},
         CONF_WEEKEND_SAME: weekday == weekend,
+        CONF_ROOMS: list(rooms or []),
     }
     if zone.get(CONF_HEATING_DEMAND_MODE) in HEATING_DEMAND_MODES:
         data[CONF_HEATING_DEMAND_MODE] = zone[CONF_HEATING_DEMAND_MODE]
     if zone.get(CONF_MONITORING_ONLY):
         data[CONF_MONITORING_ONLY] = True
-    return {"subentry_type": SUBENTRY_ZONE, "title": data["name"], "unique_id": zone_id, "data": data}
-
-
-def room_subentry(room_id: str, room: dict, zone_id: str, zone_name: str, **extra) -> dict[str, Any]:
-    """ConfigSubentryData for a room."""
-    data: dict[str, Any] = {
-        CONF_ROOM_ID: room_id,
-        CONF_ZONE_ID: zone_id,
-        "name": room.get("name", room_id),
-        CONF_TRVS: list(room.get(CONF_TRVS) or []),
-        CONF_SENSORS: [dict(s) for s in room.get(CONF_SENSORS) or []],
-        **{k: v for k, v in extra.items() if v},
-    }
-    if room.get(CONF_TEMPERATURE_OFFSET):
-        data[CONF_TEMPERATURE_OFFSET] = float(room[CONF_TEMPERATURE_OFFSET])
-    return {
-        "subentry_type": SUBENTRY_ROOM,
-        "title": room_title(data["name"], zone_name),
-        "unique_id": room_id,
-        "data": data,
-    }
+    return {"subentry_type": SUBENTRY_ZONE, "title": zone_title(data), "unique_id": zone_id, "data": data}
 
 
 def zones_to_subentries(zones: dict, taken_room_ids: set[str] | None = None) -> list[dict[str, Any]]:
-    """Convert the options/YAML zones structure to subentry data.
+    """Convert the options/YAML zones structure to zone subentry data.
 
     Room ids must be unique across zones; a clash (e.g. "bathroom" in two
     zones) gets a zone-prefixed id, remembering the old one so its entity
@@ -391,17 +406,18 @@ def zones_to_subentries(zones: dict, taken_room_ids: set[str] | None = None) -> 
     for zone_id, zone in zones.items():
         if not isinstance(zone, dict):
             continue
-        result.append(zone_subentry(zone_id, zone))
+        rooms = []
         for room_id, room in (zone.get(CONF_ROOMS) or {}).items():
             new_id = room_id
             if new_id in taken:
                 new_id = unique_id_for(f"{zone_id}_{room_id}", taken, "room")
             taken.add(new_id)
-            result.append(room_subentry(
-                new_id, room, zone_id, zone.get("name", zone_id),
+            rooms.append(stored_room(
+                new_id, room,
                 previous_room_id=room_id if new_id != room_id else None,
                 previous_zone_id=zone_id,
             ))
+        result.append(zone_subentry(zone_id, zone, rooms))
     return result
 
 
@@ -410,7 +426,7 @@ def entry_to_runtime(entry: Any) -> tuple[dict, dict]:
 
     config has the structure the coordinator and climate platform read:
     {"zones": {zone_id: {..., "rooms": {room_id: {...}}}}, "heating_demand_mode": ...}.
-    Each zone and room also carries its "subentry_id".
+    Each zone carries its "subentry_id".
     """
     settings = default_settings()
     for key, value in (entry.options.get(OPT_SETTINGS) or {}).items():
@@ -418,12 +434,11 @@ def entry_to_runtime(entry: Any) -> tuple[dict, dict]:
             settings[key] = coerce_setting(SETTINGS_BY_KEY[key], value)
 
     zones: dict[str, dict] = {}
-    subentries = list(entry.subentries.values())
-    for sub in subentries:
+    for sub in entry.subentries.values():
         if sub.subentry_type != SUBENTRY_ZONE:
             continue
-        data = dict(sub.data)
-        schedule = copy.deepcopy(dict(data.get(CONF_SCHEDULE) or {}))
+        data = copy.deepcopy(dict(sub.data))
+        schedule = dict(data.get(CONF_SCHEDULE) or {})
         if data.get(CONF_WEEKEND_SAME):
             schedule[CONF_WEEKEND] = copy.deepcopy(schedule.get(CONF_WEEKDAY, []))
         zone = {
@@ -435,21 +450,74 @@ def entry_to_runtime(entry: Any) -> tuple[dict, dict]:
         for key in (CONF_HEATING_DEMAND_MODE, CONF_MONITORING_ONLY):
             if data.get(key):
                 zone[key] = data[key]
+        for room in data.get(CONF_ROOMS) or []:
+            room = dict(room)
+            zone[CONF_ROOMS][room.pop(CONF_ROOM_ID)] = room
         zones[data[CONF_ZONE_ID]] = zone
-    for sub in subentries:
-        if sub.subentry_type != SUBENTRY_ROOM:
-            continue
-        data = copy.deepcopy(dict(sub.data))
-        zone = zones.get(data.get(CONF_ZONE_ID))
-        if zone is None:
-            continue
-        room_id = data.pop(CONF_ROOM_ID)
-        data.pop(CONF_ZONE_ID, None)
-        data["subentry_id"] = sub.subentry_id
-        zone[CONF_ROOMS][room_id] = data
     for problem in dedupe_trvs(zones):
         _LOGGER.warning("TRV assigned to more than one room: %s", problem)
     return {CONF_ZONES: zones, CONF_HEATING_DEMAND_MODE: settings[CONF_HEATING_DEMAND_MODE]}, settings
+
+
+def all_room_ids(entry: Any, exclude_zone: str | None = None) -> set[str]:
+    """Room ids in use (room ids are unique across zones)."""
+    return {
+        room.get(CONF_ROOM_ID)
+        for sub in entry.subentries.values()
+        if sub.subentry_type == SUBENTRY_ZONE and sub.data.get(CONF_ZONE_ID) != exclude_zone
+        for room in sub.data.get(CONF_ROOMS) or []
+    }
+
+
+def match_room_ids(new_rooms: list[dict], old_rooms: list[dict], taken: set[str]) -> list[dict]:
+    """Give each room from the zone form the id (and history) of the room it was.
+
+    The form can't carry ids, so a room keeps its id, and so its entity, if
+    it has the same id (YAML import), else the same name, else the same TRVs
+    and sensors (it was renamed), else the same position in an
+    unchanged-length list. Otherwise it's new.
+    """
+    unused = list(old_rooms)
+    taken = set(taken)
+
+    def take(predicate) -> dict | None:
+        for old in unused:
+            if predicate(old):
+                unused.remove(old)
+                return old
+        return None
+
+    def devices(room: dict) -> tuple:
+        sensors = [s["temperature"] if isinstance(s, dict) else s for s in room.get(CONF_SENSORS) or []]
+        return (sorted(room.get(CONF_TRVS) or []), sorted(sensors))
+
+    matched: list[dict | None] = [
+        take(lambda old, room_id=room.get(CONF_ROOM_ID): old[CONF_ROOM_ID] == room_id) if room.get(CONF_ROOM_ID) else None
+        for room in new_rooms
+    ]
+    for index, room in enumerate(new_rooms):
+        if matched[index] is None:
+            name = room["name"].casefold()
+            matched[index] = take(lambda old, name=name: old["name"].casefold() == name)
+    for index, room in enumerate(new_rooms):
+        if matched[index] is None and any(devices(room)):
+            matched[index] = take(lambda old, room=room: devices(old) == devices(room))
+    if len(new_rooms) == len(old_rooms):
+        for index in range(len(new_rooms)):
+            if matched[index] is None and old_rooms[index] in unused:
+                unused.remove(old_rooms[index])
+                matched[index] = old_rooms[index]
+
+    taken.update(old[CONF_ROOM_ID] for old in old_rooms)
+    result = []
+    for room, old in zip(new_rooms, matched):
+        if old is not None:
+            result.append(stored_room(old[CONF_ROOM_ID], {**room, **{k: old[k] for k in ROOM_HISTORY_KEYS if k in old}}))
+        else:
+            room_id = unique_id_for(room.get(CONF_ROOM_ID) or room["name"], taken, "room")
+            taken.add(room_id)
+            result.append(stored_room(room_id, room))
+    return result
 
 
 # ---------------------------------------------------------------------------

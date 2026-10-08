@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Set up Heating Manager",
-        "description": "Name your first heating zone (an area on one heating circuit, e.g. Downstairs). It starts with a 06:30–22:00 schedule at 19°C.\n\nThen use **Add room** on the integration page to add rooms with their TRVs and temperature sensors, and **Add zone** for more zones. The cog opens settings.",
+        "description": "Name your first heating zone (an area on one heating circuit, e.g. Downstairs). It starts with a 06:30–22:00 schedule at 19°C.\n\nThen open the zone (its cog on the integration page) to add rooms with their TRVs and temperature sensors, and use **Add zone** for more zones. Configure opens settings.",
         "data": {
           "name": "Zone name"
         }
@@ -13,7 +13,7 @@
       "name_required": "Please enter a name."
     },
     "abort": {
-      "single_instance_allowed": "Heating Manager is already set up. Use Add zone and Add room on its integration page.",
+      "single_instance_allowed": "Heating Manager is already set up. Use Add zone, or a zone's cog, on its integration page.",
       "already_configured": "Heating Manager is already set up."
     }
   },
@@ -164,13 +164,15 @@
       "step": {
         "user": {
           "title": "Add zone",
-          "description": "A zone is an area on one heating circuit. Add its rooms with **Add room** on the integration page.",
+          "description": "A zone is an area on one heating circuit, such as a floor. Add its rooms below.",
           "data": {
             "name": "Name",
+            "rooms": "Rooms",
             "heating_demand_mode": "Heating demand mode",
             "monitoring_only": "Monitoring only"
           },
           "data_description": {
+            "rooms": "Each room's TRVs, temperature sensors and offset. TRVs are set automatically and each can belong to one room only. With three or more sensors the median is used, so one odd sensor can't skew the room; without sensors the room uses its TRVs' temperature. The offset runs the room warmer (+) or cooler (−) than the schedule.",
             "heating_demand_mode": "When this zone calls for heat. Its climate entity shows 'heating' then, for your boiler automation.",
             "monitoring_only": "Show this zone's room temperatures without heating: it never calls for heat and its TRVs, if any, are left alone."
           },
@@ -191,19 +193,31 @@
               },
               "data_description": {
                 "periods": "Used when 'Same as weekdays' is off."
+              }
+            },
+            "advanced": {
+              "name": "Advanced",
+              "description": "Last seen sensors",
+              "data": {
+                "last_seen": "Last seen sensors"
+              },
+              "data_description": {
+                "last_seen": "Optional. Pair a room's temperature sensor with a separate timestamp entity (e.g. Zigbee2MQTT last_seen), to spot dead sensors sooner."
               }
             }
           }
         },
         "reconfigure": {
           "title": "Reconfigure zone",
-          "description": "A zone is an area on one heating circuit. Add its rooms with **Add room** on the integration page.",
+          "description": "A zone is an area on one heating circuit, such as a floor. Add its rooms below.",
           "data": {
             "name": "Name",
+            "rooms": "Rooms",
             "heating_demand_mode": "Heating demand mode",
             "monitoring_only": "Monitoring only"
           },
           "data_description": {
+            "rooms": "Each room's TRVs, temperature sensors and offset. TRVs are set automatically and each can belong to one room only. With three or more sensors the median is used, so one odd sensor can't skew the room; without sensors the room uses its TRVs' temperature. The offset runs the room warmer (+) or cooler (−) than the schedule.",
             "heating_demand_mode": "When this zone calls for heat. Its climate entity shows 'heating' then, for your boiler automation.",
             "monitoring_only": "Show this zone's room temperatures without heating: it never calls for heat and its TRVs, if any, are left alone."
           },
@@ -224,6 +238,16 @@
               },
               "data_description": {
                 "periods": "Used when 'Same as weekdays' is off."
+              }
+            },
+            "advanced": {
+              "name": "Advanced",
+              "description": "Last seen sensors",
+              "data": {
+                "last_seen": "Last seen sensors"
+              },
+              "data_description": {
+                "last_seen": "Optional. Pair a room's temperature sensor with a separate timestamp entity (e.g. Zigbee2MQTT last_seen), to spot dead sensors sooner."
               }
             }
           }
@@ -233,82 +257,14 @@
         "name_required": "Please enter a name.",
         "name_in_use": "Another zone already has this name.",
         "invalid_time": "Enter valid start and end times for every period.",
-        "overlap": "Periods on the same day can't overlap ({overlap})."
+        "overlap": "Periods on the same day can't overlap ({overlap}).",
+        "room_name_required": "Every room needs a name.",
+        "room_name_in_use": "Two rooms are called {room}. Room names in a zone must be different.",
+        "room_empty": "{room} has no TRVs or temperature sensors. Add at least one.",
+        "trv_in_use": "Already used by another room: {trv_conflict}. A TRV can only belong to one room."
       },
       "abort": {
         "reconfigure_successful": "Zone updated."
-      }
-    },
-    "room": {
-      "entry_type": "Room",
-      "initiate_flow": {
-        "user": "Add room"
-      },
-      "step": {
-        "user": {
-          "title": "Add room",
-          "data": {
-            "zone": "Zone",
-            "name": "Name",
-            "trvs": "TRVs",
-            "sensors": "Temperature sensors",
-            "temperature_offset": "Temperature offset"
-          },
-          "data_description": {
-            "trvs": "Radiator valves in this room. They're set automatically. Each TRV can belong to one room only.",
-            "sensors": "Room temperature sensors, placed away from radiators. With three or more, the median is used so one odd sensor can't skew the room. Without any, the room uses its TRVs' temperature.",
-            "temperature_offset": "Run this room warmer (+) or cooler (−) than its zone's schedule. Doesn't apply to boost, away mode or a temperature set on the room itself."
-          },
-          "sections": {
-            "advanced": {
-              "name": "Advanced",
-              "description": "Last seen sensors",
-              "data": {
-                "last_seen": "Last seen sensors"
-              },
-              "data_description": {
-                "last_seen": "Optional. For temperature sensors with a separate timestamp entity (e.g. Zigbee2MQTT last_seen), to spot dead sensors sooner."
-              }
-            }
-          }
-        },
-        "reconfigure": {
-          "title": "Reconfigure room",
-          "data": {
-            "zone": "Zone",
-            "name": "Name",
-            "trvs": "TRVs",
-            "sensors": "Temperature sensors",
-            "temperature_offset": "Temperature offset"
-          },
-          "data_description": {
-            "trvs": "Radiator valves in this room. They're set automatically. Each TRV can belong to one room only.",
-            "sensors": "Room temperature sensors, placed away from radiators. With three or more, the median is used so one odd sensor can't skew the room. Without any, the room uses its TRVs' temperature.",
-            "temperature_offset": "Run this room warmer (+) or cooler (−) than its zone's schedule. Doesn't apply to boost, away mode or a temperature set on the room itself."
-          },
-          "sections": {
-            "advanced": {
-              "name": "Advanced",
-              "description": "Last seen sensors",
-              "data": {
-                "last_seen": "Last seen sensors"
-              },
-              "data_description": {
-                "last_seen": "Optional. For temperature sensors with a separate timestamp entity (e.g. Zigbee2MQTT last_seen), to spot dead sensors sooner."
-              }
-            }
-          }
-        }
-      },
-      "error": {
-        "name_required": "Please enter a name.",
-        "room_empty": "Add at least one TRV or temperature sensor.",
-        "trv_in_use": "Already used by another room: {trv_conflict}. A TRV can only belong to one room.",
-        "zone_missing": "Choose a zone."
-      },
-      "abort": {
-        "reconfigure_successful": "Room updated.",
-        "no_zones": "Add a zone first."
       }
     }
   },
@@ -344,6 +300,14 @@
       "fields": {
         "temperature": "Temperature sensor",
         "last_seen": "Last seen sensor"
+      }
+    },
+    "zone_room": {
+      "fields": {
+        "name": "Name",
+        "trvs": "TRVs",
+        "sensors": "Temperature sensors",
+        "temperature_offset": "Temperature offset"
       }
     }
   },

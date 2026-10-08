@@ -59,27 +59,31 @@ Everything is set up in the Home Assistant UI; no YAML is needed. Requires Home 
 
 1. Go to **Settings → Devices & services → Add integration** and choose **Heating Manager**.
 2. Name your first zone (an area served by one boiler or heating circuit, e.g. "Downstairs"). It starts with a 06:30–22:00 schedule at 19°C.
-3. On the integration's page:
-   - **Add zone** adds another zone. A zone's form has its name, heating demand mode, **monitoring only**, and its weekday and weekend schedules. Add, edit, reorder or delete periods (start, end, temperature) in each list; turn on **Same as weekdays** to use one schedule all week. Periods on the same day can't overlap: the form names the two that clash.
-   - **Add room** adds a room: pick its zone, TRVs and temperature sensors, and optionally a temperature offset. Under **Advanced**, pair sensors with separate "last seen" entities.
-   - Each zone and room is listed on the page. Click its **⚙** (gear) to change it, or use its **⋮** menu to delete it. Deleting a zone also deletes its rooms.
+3. On the integration's page, each zone is a card holding its rooms' devices, titled with a short summary such as `Downstairs · 3 rooms` (plus `monitoring only` if set). Collapse a card with its arrow.
+   - **Add zone** adds a zone. Click a zone's **⚙** (gear) to change it, or use its **⋮** menu to delete it (with its rooms).
+   - A zone's form has:
+     - **Name**
+     - **Rooms**: add, edit, reorder or delete rooms. Each room has a name, its TRVs, its temperature sensors and an optional temperature offset. A TRV can belong to one room only.
+     - **Heating demand mode** and **Monitoring only**
+     - **Weekday schedule** and **Weekend schedule**: add, edit, reorder or delete periods (start, end, temperature); turn on **Same as weekdays** to use one schedule all week. Periods on the same day can't overlap: the form names the two that clash.
+     - **Advanced**: pair temperature sensors with separate "last seen" entities.
    - **Configure** has **Settings** (one form: temperatures, heating demand, boiler protection, sensors and boost, with TRV control, analytics and update interval in collapsed sections; the defaults suit most homes) and **Import from YAML file**.
 
 Changes apply as soon as you submit a form.
 
-Each zone and each room appears as a device; rooms are linked to their zone.
+Each zone and each room appears as a device; rooms are linked to their zone. A room keeps its entity when you rename it, reorder the list or change its TRVs and sensors. Renaming a room *and* changing its TRVs and sensors in the same save, when rooms are also added or removed, makes it a new room with a new entity; do one change at a time to avoid that. Moving a room to another zone (deleting it from one and adding it to the other) also gives it a new entity.
 
 ### Migrating from YAML
 
 If you used an earlier version configured with `heating_manager:` in `configuration.yaml`, just upgrade and restart. Your `heating_manager.yaml` is imported into the UI automatically, keeping your zones, rooms, schedules and settings, as well as your entity IDs, history, boosts, overrides and learned TRV offsets.
 
-If the automatic import didn't happen (for example, you removed the YAML before upgrading, or the integration was set up with no zones), use **Configure → Import from YAML file** instead. Enter the file's path relative to your config folder (e.g. `heating_manager.yaml`) and choose whether to also import settings. You'll see the zones, rooms and settings found before anything changes. Zones in the file are added, or replace a zone with the same ID (and its rooms); other zones are kept. Overlapping schedule periods in the file are listed as warnings; they import as they are, and the zone's form asks you to fix them the next time you edit it. This works any time, not just when upgrading.
+If the automatic import didn't happen (for example, you removed the YAML before upgrading, or the integration was set up with no zones), use **Configure → Import from YAML file** instead. Enter the file's path relative to your config folder (e.g. `heating_manager.yaml`) and choose whether to also import settings. You'll see the zones, rooms and settings found before anything changes. Zones in the file are added, or replace a zone with the same ID (its rooms are replaced too; rooms with the same ID or name keep their entities); other zones are kept. Overlapping schedule periods in the file are listed as warnings; they import as they are, and the zone's form asks you to fix them the next time you edit it. This works any time, not just when upgrading.
 
 After the automatic import, Home Assistant shows a repair notice: remove the `heating_manager:` entry from `configuration.yaml`, delete `heating_manager.yaml` and restart. From then on, make changes on the integration page; edits to the YAML are ignored.
 
-### Upgrading from 2.x
+### Upgrading
 
-Version 3.0 moves zones and rooms out of the Configure menu and onto the integration page. Your existing setup is converted automatically on the first restart, keeping entity IDs, history and learned TRV offsets. Room IDs are now unique across zones: if two zones had a room with the same ID (e.g. two `bathroom`s), the second becomes `<zone>_bathroom`; its entity ID doesn't change.
+Version 3.0 moved zones and rooms out of the Configure menu and onto the integration page; 3.2 moves each zone's rooms into the zone's form. Your existing setup (2.x, 3.0 or 3.1) is converted automatically on the first restart, keeping entity IDs, history, learned TRV offsets and any device names or areas you set. Room IDs are unique across zones: if two zones had a room with the same ID (e.g. two `bathroom`s), the second becomes `<zone>_bathroom`; its entity ID doesn't change.
 
 ### Entities
 
@@ -316,9 +320,9 @@ The global climate entity attributes include:
 
 ### Temperature Sensor Configuration
 
-Pick a room's temperature sensors in its room form (**Add room**, or the room's ⚙). With one or two fresh sensors the room uses their average; with three or more it uses the **median**, so a single odd sensor (one near a fridge, oven or window) can't skew the room. Sensors can report in °C or °F; readings are converted.
+Pick a room's temperature sensors in its zone's **Rooms** list. With one or two fresh sensors the room uses their average; with three or more it uses the **median**, so a single odd sensor (one near a fridge, oven or window) can't skew the room. Sensors can report in °C or °F; readings are converted.
 
-A sensor counts as fresh if it reported within the last 30 minutes, using Home Assistant's own report time, so a sensor holding a steady temperature is still fresh. For sensors that expose a separate timestamp entity (for example Zigbee2MQTT's `last_seen`), tick **Set 'last seen' sensors** in the room form to map each sensor to it.
+A sensor counts as fresh if it reported within the last 30 minutes, using Home Assistant's own report time, so a sensor holding a steady temperature is still fresh. For sensors that expose a separate timestamp entity (for example Zigbee2MQTT's `last_seen`), pair each sensor with it under **Advanced** in the zone's form.
 
 **Benefits of dedicated last_seen sensors:**
 - More accurate timestamps for battery-powered sensors
@@ -359,7 +363,7 @@ The system automatically uses the most accurate timestamp available and indicate
 
 You can configure individual temperature adjustments for specific rooms within a zone using the `temperature_offset` parameter. This allows you to maintain different comfort levels in different rooms while keeping them all on the same heating schedule.
 
-**Configuration:** set **Temperature offset** in the room's form (**Add room**, or the room's ⚙).
+**Configuration:** set the room's **Temperature offset** in its zone's **Rooms** list.
 
 **How it works:**
 
