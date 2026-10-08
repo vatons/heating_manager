@@ -19,6 +19,8 @@ class HeatingLogic:
         self.heating_deadband = heating_deadband
         self.room_heating_state: dict[str, dict[str, dict]] = {}  # zone_id -> room_id -> {previous_target, target_reached}
         self._zone_avg_heating_active: dict[str, bool] = {}  # zone_id -> current demand state (hysteresis)
+        # zone_id -> {"previous_target", "target_reached"}: same smart deadband as rooms
+        self._zone_avg_target_state: dict[str, dict] = {}
 
     def calculate_heating_need(
         self, zone_id: str, room_id: str, room_temp: float | None, target_temp: float | None
@@ -157,7 +159,22 @@ class HeatingLogic:
             avg_room_temp = sum(room_temps) / len(room_temps)
             avg_target_temp = sum(target_temps) / len(target_temps)
 
-            # Use hysteresis: turn on when below (target - deadband),
+            # Smart deadband, as for rooms: after the average target changes, turn on
+            # with the minimal deadband until the average first reaches the target;
+            # after that, use the full deadband to prevent short-cycling. Without this,
+            # a small target increase (e.g. 0.2°C) never fires the boiler.
+            target_state = self._zone_avg_target_state.setdefault(
+                _zone_id_key, {"previous_target": None, "target_reached": False}
+            )
+            previous_target = target_state["previous_target"]
+            if previous_target is None or abs(avg_target_temp - previous_target) > TARGET_REACHED_THRESHOLD:
+                target_state["previous_target"] = avg_target_temp
+                target_state["target_reached"] = False
+            if avg_room_temp >= avg_target_temp - TARGET_REACHED_THRESHOLD:
+                target_state["target_reached"] = True
+            deadband = self.heating_deadband if target_state["target_reached"] else MINIMAL_DEADBAND
+
+            # Hysteresis: turn on when below (target - deadband),
             # turn off only when at or above target.
             currently_active = self._zone_avg_heating_active.get(_zone_id_key, False)
             if currently_active:
@@ -165,7 +182,7 @@ class HeatingLogic:
                 demand = avg_room_temp < avg_target_temp
             else:
                 # Turn on only when clearly below target
-                demand = avg_room_temp < avg_target_temp - self.heating_deadband
+                demand = avg_room_temp < avg_target_temp - deadband
             self._zone_avg_heating_active[_zone_id_key] = demand
             return demand
 
@@ -183,6 +200,7 @@ class HeatingLogic:
         return {
             "room_heating_state": self.room_heating_state,
             "zone_avg_heating_active": self._zone_avg_heating_active,
+            "zone_avg_target_state": self._zone_avg_target_state,
         }
 
     def restore_state(self, stored_state: dict) -> None:
@@ -190,6 +208,7 @@ class HeatingLogic:
         if isinstance(stored_state, dict) and "room_heating_state" in stored_state:
             self.room_heating_state = stored_state.get("room_heating_state", {})
             self._zone_avg_heating_active = stored_state.get("zone_avg_heating_active", {})
+            self._zone_avg_target_state = stored_state.get("zone_avg_target_state", {})
         else:
             # Backward-compat: old storage stored room_heating_state directly
             self.room_heating_state = stored_state

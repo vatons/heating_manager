@@ -101,8 +101,15 @@ def test_boost_always_demands_heat(logic):
     assert logic.calculate_zone_heating_demand(rooms, HEATING_DEMAND_MODE_ZONE_AVERAGE, "z") is True
 
 
+def reach_target(logic, zone="z", target=20):
+    """Put a zone in the 'target reached' state, where the full deadband applies."""
+    rooms = {"a": room(target, target)}
+    assert logic.calculate_zone_heating_demand(rooms, HEATING_DEMAND_MODE_ZONE_AVERAGE, zone) is False
+
+
 def test_zone_average_hysteresis(logic):
     mode = HEATING_DEMAND_MODE_ZONE_AVERAGE
+    reach_target(logic)
     rooms = {"a": room(19.8, 20), "b": room(19.8, 20)}
     assert logic.calculate_zone_heating_demand(rooms, mode, "z") is False   # within deadband
     rooms = {"a": room(19.5, 20), "b": room(19.6, 20)}
@@ -115,6 +122,8 @@ def test_zone_average_hysteresis(logic):
 
 def test_zone_average_hysteresis_is_per_zone(logic):
     mode = HEATING_DEMAND_MODE_ZONE_AVERAGE
+    reach_target(logic, "z1")
+    reach_target(logic, "z2")
     assert logic.calculate_zone_heating_demand({"a": room(19, 20)}, mode, "z1") is True
     assert logic.calculate_zone_heating_demand({"a": room(19.8, 20)}, mode, "z2") is False
     assert logic.calculate_zone_heating_demand({"a": room(19.8, 20)}, mode, "z1") is True
@@ -136,6 +145,7 @@ def test_zone_average_hides_a_cold_room(logic):
     Bedroom at 15.5°C (4.5° under) is masked by two warm rooms, so the boiler
     never fires for it. This is by design of the mode but worth knowing.
     """
+    reach_target(logic)
     rooms = {"a": room(22.0, 20), "b": room(22.0, 20), "c": room(15.5, 20, True)}
     assert logic.calculate_zone_heating_demand(rooms, HEATING_DEMAND_MODE_ZONE_AVERAGE, "z") is False
 
@@ -152,3 +162,45 @@ def test_off_rooms_ignored_for_demand_even_when_boosted(logic):
     rooms = {"a": {**room(15, 20, True, boost={"temperature": 22}), "off": True}, "b": room(20, 20)}
     assert logic.calculate_zone_heating_demand(rooms, HEATING_DEMAND_MODE_ANY_ROOM, "z") is False
     assert logic.calculate_zone_heating_demand(rooms, HEATING_DEMAND_MODE_ZONE_AVERAGE, "z") is False
+
+
+# ---------------------------------------------------------------------------
+# zone_average smart deadband after a target change
+# ---------------------------------------------------------------------------
+
+def test_zone_average_small_target_increase_fires(logic):
+    """Average 0.2°C under a new target: heat (minimal deadband), not wait for 0.3°C."""
+    mode = HEATING_DEMAND_MODE_ZONE_AVERAGE
+    reach_target(logic, target=17.5)
+    assert logic.calculate_zone_heating_demand({"a": room(19.8, 20)}, mode, "z") is True
+    # Stays on until the target is reached, then coasts within the full deadband
+    assert logic.calculate_zone_heating_demand({"a": room(19.95, 20)}, mode, "z") is True
+    assert logic.calculate_zone_heating_demand({"a": room(20.0, 20)}, mode, "z") is False
+    assert logic.calculate_zone_heating_demand({"a": room(19.8, 20)}, mode, "z") is False
+    assert logic.calculate_zone_heating_demand({"a": room(19.69, 20)}, mode, "z") is True
+
+
+def test_zone_average_within_minimal_deadband_does_not_fire(logic):
+    reach_target(logic, target=17.5)
+    assert logic.calculate_zone_heating_demand({"a": room(19.95, 20)}, HEATING_DEMAND_MODE_ZONE_AVERAGE, "z") is False
+
+
+def test_zone_average_target_decrease_does_not_fire(logic):
+    reach_target(logic, target=20)
+    assert logic.calculate_zone_heating_demand({"a": room(20.0, 17.5)}, HEATING_DEMAND_MODE_ZONE_AVERAGE, "z") is False
+
+
+def test_zone_average_target_state_persists(logic):
+    mode = HEATING_DEMAND_MODE_ZONE_AVERAGE
+    reach_target(logic, target=20)
+    restored = HeatingLogic(0.3)
+    restored.restore_state(logic.get_state_for_storage())
+    # Reached state survives a restart: full deadband still applies
+    assert restored.calculate_zone_heating_demand({"a": room(19.8, 20)}, mode, "z") is False
+
+
+def test_zone_average_restores_storage_without_target_state(logic):
+    """Storage written before this change has no zone_avg_target_state."""
+    restored = HeatingLogic(0.3)
+    restored.restore_state({"room_heating_state": {}, "zone_avg_heating_active": {"z": False}})
+    assert restored.calculate_zone_heating_demand({"a": room(19.8, 20)}, HEATING_DEMAND_MODE_ZONE_AVERAGE, "z") is True
