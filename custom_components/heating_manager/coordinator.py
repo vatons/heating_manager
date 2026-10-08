@@ -102,7 +102,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         self.rooms_off: dict[str, list[str]] = {}  # zone_id -> room_ids switched off by the user
 
         # Initialize manager components
-        self.temperature_manager = TemperatureManager(hass)
+        self.temperature_manager = TemperatureManager(hass, fallback_mode)
         self.schedule_manager = ScheduleManager(minimum_temp)
         self.heating_logic = HeatingLogic(heating_deadband)
         self.boost_manager = BoostManager(hass, boost_duration)
@@ -267,7 +267,9 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     else:
                         # Set TRV temperatures
                         await self.trv_manager.set_trv_temperatures(
-                            zone_id, room_id, room_config, target_temp, room_temp, needs_heating
+                            zone_id, room_id, room_config, target_temp, room_temp, needs_heating,
+                            # Only learn TRV offsets against the room's own sensors
+                            learn_offset=temp_metadata["source"] == "local_sensors",
                         )
 
                     # Collect TRV offset information for display

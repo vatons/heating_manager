@@ -76,6 +76,7 @@ class TRVController:
         target_temp: float,
         trv_internal_temp: float | None,
         needs_heating: bool,
+        learn_offset: bool = True,
     ) -> float:
         """Calculate optimal TRV setpoint using dynamic sensor offset.
 
@@ -87,6 +88,9 @@ class TRVController:
             target_temp: Desired room temperature (°C)
             trv_internal_temp: TRV's internal sensor temperature (°C)
             needs_heating: Whether room currently needs heating
+            learn_offset: Update the learned offset from this reading. False when
+                room_temp is a fallback (zone average, TRV, stale value) rather
+                than the room's own sensors.
 
         Returns:
             Optimal TRV setpoint temperature (°C)
@@ -111,7 +115,8 @@ class TRVController:
         current_offset = trv_internal_temp - room_temp
 
         # Update offset EMA for learning
-        self._update_offset_ema(zone_id, room_id, trv_id, current_offset)
+        if learn_offset:
+            self._update_offset_ema(zone_id, room_id, trv_id, current_offset)
 
         # Get learned EMA offset for this TRV
         ema_offset = self._get_ema_offset(zone_id, room_id, trv_id)
@@ -299,6 +304,7 @@ class TRVController:
         target_temp: float,
         room_temp: float | None,
         needs_heating: bool,
+        learn_offset: bool = True,
     ) -> None:
         """Set TRV temperature with intelligent setpoint calculation.
 
@@ -327,7 +333,8 @@ class TRVController:
         # Calculate optimal setpoint
         trv_setpoint = self.calculate_trv_setpoint(
             zone_id, room_id, trv_id,
-            room_temp, target_temp, trv_internal_temp, needs_heating
+            room_temp, target_temp, trv_internal_temp, needs_heating,
+            learn_offset=learn_offset,
         )
 
         # Fit the setpoint to what this TRV accepts. Home Assistant rejects a

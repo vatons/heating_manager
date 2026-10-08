@@ -363,7 +363,6 @@ async def test_bad_schedule_in_one_zone_does_not_break_others(hass, add_trvs, ma
     assert coordinator.data["zone_2"]["rooms"]["x"]["target_temperature"] == 10.0    # minimum
 
 
-@pytest.mark.xfail(reason="BUG: fallback_mode is read from config but never used")
 async def test_fallback_mode_trv_uses_trv_internal_temperature(hass, add_trvs, make_coordinator):
     await add_trvs(FakeTRV("room_trv", current_temperature=17.5))
     hass.states.async_set(SENSOR, "unavailable")
@@ -528,3 +527,22 @@ async def test_set_room_off_twice_and_on_is_idempotent(basic):
     await coordinator.set_room_off("zone_1", "room", False)
     await coordinator.set_room_off("zone_1", "room", False)
     assert coordinator.rooms_off == {}
+
+
+async def test_offset_not_learned_from_fallback_temperature(hass, add_trvs, make_coordinator, _frozen):
+    """A zone-average room temperature must not overwrite the TRV's learned bias."""
+    await add_trvs(FakeTRV("room_trv", current_temperature=21.0), FakeTRV("other_trv"))
+    set_temp(hass, SENSOR, 18.0)
+    set_temp(hass, "sensor.other", 21.0)
+    cfg = single_room_config()
+    cfg["zones"]["zone_1"]["rooms"]["other"] = make_room("Other", ["climate.other_trv"], ["sensor.other"])
+    coordinator = make_coordinator(cfg)
+    await refresh(coordinator)
+    assert coordinator.trv_controller._get_ema_offset("zone_1", "room", TRV) == pytest.approx(3.0)
+    hass.states.async_set(SENSOR, "unavailable")
+    for _ in range(10):
+        _frozen.tick(timedelta(minutes=5))
+        set_temp(hass, "sensor.other", 21.0 + (_ % 2) * 0.01)
+        await refresh(coordinator)
+    assert room_data(coordinator)["temperature_source"] == "zone_average"
+    assert coordinator.trv_controller._get_ema_offset("zone_1", "room", TRV) == pytest.approx(3.0)

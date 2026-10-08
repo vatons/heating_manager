@@ -204,3 +204,79 @@ async def test_last_seen_with_utc_offset_still_supported(hass, tm):
     hass.states.async_set("sensor.t_last_seen", "2026-01-14T20:00:00+00:00")   # == NOW (12:00 -08:00)
     temp, meta = await read(tm, {"sensors": [{"temperature": "sensor.t", "last_seen": "sensor.t_last_seen"}]})
     assert meta["sensors_status"][0]["status"] == "active"
+
+
+# ---------------------------------------------------------------------------
+# fallback_mode
+# ---------------------------------------------------------------------------
+
+def tm_mode(hass, mode):
+    return TemperatureManager(hass, fallback_mode=mode)
+
+
+async def test_fallback_trv_uses_room_trvs(hass):
+    set_temp(hass, "sensor.other", 21.0)
+    hass.states.async_set("climate.a", "heat", {"current_temperature": 18.0})
+    hass.states.async_set("climate.b", "heat", {"current_temperature": 19.0})
+    hass.states.async_set("climate.c", "unavailable", {"current_temperature": 5.0})
+    room = {"trvs": ["climate.a", "climate.b", "climate.c", "climate.missing"], "sensors": ["sensor.dead"]}
+    zones = zones_with({"r": room, "other": {"sensors": ["sensor.other"]}})
+    temp, meta = await read(tm_mode(hass, "trv"), room, zones)
+    assert temp == pytest.approx(18.5)
+    assert meta["source"] == "trv"
+
+
+async def test_fallback_trv_for_room_without_sensors(hass):
+    hass.states.async_set("climate.a", "heat", {"current_temperature": 18.0})
+    room = {"trvs": ["climate.a"]}
+    temp, meta = await read(tm_mode(hass, "trv"), room)
+    assert (temp, meta["source"]) == (18.0, "trv")
+
+
+async def test_fallback_trv_without_readings_uses_zone_average(hass):
+    set_temp(hass, "sensor.other", 21.0)
+    hass.states.async_set("climate.a", "heat", {"current_temperature": None})
+    room = {"trvs": ["climate.a"], "sensors": ["sensor.dead"]}
+    zones = zones_with({"r": room, "other": {"sensors": ["sensor.other"]}})
+    temp, meta = await read(tm_mode(hass, "trv"), room, zones)
+    assert (temp, meta["source"]) == (21.0, "zone_average")
+
+
+async def test_fallback_last_known_uses_old_reading(hass, _frozen):
+    tm = tm_mode(hass, "last_known")
+    room = {"sensors": ["sensor.a"]}
+    set_temp(hass, "sensor.a", 18.5)
+    await read(tm, room)
+    _frozen.tick(timedelta(hours=3))
+    temp, meta = await read(tm, room)
+    assert (temp, meta["source"]) == (18.5, "last_known")
+
+
+async def test_fallback_last_known_after_restart_uses_stale_state(hass, _frozen):
+    set_temp(hass, "sensor.a", 18.5)
+    _frozen.tick(timedelta(hours=3))
+    temp, meta = await read(tm_mode(hass, "last_known"), {"sensors": ["sensor.a"]})
+    assert (temp, meta["source"]) == (18.5, "last_known")
+
+
+async def test_fallback_last_known_prefers_most_recent_sensor(hass, _frozen):
+    set_temp(hass, "sensor.a", 17.0)
+    _frozen.tick(timedelta(hours=1))
+    set_temp(hass, "sensor.b", 19.0)
+    _frozen.tick(timedelta(hours=1))
+    temp, _ = await read(tm_mode(hass, "last_known"), {"sensors": ["sensor.a", "sensor.b"]})
+    assert temp == 19.0
+
+
+async def test_fallback_last_known_without_any_reading_uses_zone_average(hass):
+    set_temp(hass, "sensor.other", 21.0)
+    room = {"sensors": ["sensor.never"]}
+    zones = zones_with({"r": room, "other": {"sensors": ["sensor.other"]}})
+    temp, meta = await read(tm_mode(hass, "last_known"), room, zones)
+    assert (temp, meta["source"]) == (21.0, "zone_average")
+
+
+async def test_unknown_fallback_mode_uses_zone_average(hass, caplog):
+    tm = tm_mode(hass, "bogus")
+    assert tm.fallback_mode == "zone_average"
+    assert "Unknown fallback_mode" in caplog.text

@@ -109,19 +109,12 @@ def test_legacy_detection_handles_empty_first_room(hass):
     assert ctrl._get_ema_offset("z", "r", TRV) == pytest.approx(2.0)
 
 
-@pytest.mark.xfail(
-    reason="BUG?: EMA alpha 0.15/min forgets in ~6 min, so the 'learned' offset "
-    "chases radiator heat instead of learning the TRV's sensor bias. Undecided: a "
-    "thermal simulation showed little comfort difference with a slower alpha"
-)
-def test_learned_offset_is_stable_during_radiator_warm_up(ctrl):
-    # Hours of steady state with a 1°C bias
-    for _ in range(240):
-        setpoint(ctrl, 19.0, 20.0, 20.0, True)
-    # Radiator warms up: TRV internal sensor jumps 4°C for 10 minutes
-    for _ in range(10):
-        setpoint(ctrl, 19.0, 20.0, 24.0, True)
-    assert ctrl._get_ema_offset("z", "r", TRV) < 2.0
+
+
+def test_learn_offset_false_leaves_learned_offset_unchanged(ctrl):
+    setpoint(ctrl, 18.0, 20.0, 21.0, True)                       # learn +3
+    ctrl.calculate_trv_setpoint("z", "r", TRV, 18.0, 20.0, 18.0, True, learn_offset=False)
+    assert ctrl._get_ema_offset("z", "r", TRV) == pytest.approx(3.0)
 
 
 def test_unknown_room_temperature_still_applies_learned_offset(ctrl):

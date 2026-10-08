@@ -771,9 +771,13 @@ Can be set globally or overridden per-zone in `heating_manager.yaml`.
 
 ### Fallback Modes
 
-- `zone_average`: Use average of all zone sensors (recommended)
-- `trv`: Use TRV's internal temperature sensor
-- `last_known`: Use last known sensor value
+Used when a room has no sensor reading from the last 30 minutes, or has no sensors configured:
+
+- `zone_average`: Use the average of the zone's other fresh sensors (default, recommended)
+- `trv`: Use the average internal temperature of the room's TRVs. These usually read warmer than the room
+- `last_known`: Use the room's most recent sensor reading, however old
+
+If `trv` or `last_known` has no data, the zone average is used. TRV offsets are only learned from the room's own sensors, never from a fallback temperature.
 
 ### Schedule Time Format
 

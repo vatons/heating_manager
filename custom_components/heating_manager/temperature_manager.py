@@ -9,6 +9,10 @@ from homeassistant.util import dt as dt_util
 from .const import (
     CONF_ROOMS,
     CONF_SENSORS,
+    CONF_TRVS,
+    FALLBACK_MODE_LAST_KNOWN,
+    FALLBACK_MODE_TRV,
+    FALLBACK_MODE_ZONE_AVERAGE,
     DEFAULT_MAX_TEMP_CHANGE_PER_MIN,
     SENSOR_TIMEOUT,
 )
@@ -30,9 +34,23 @@ def state_last_reported(state) -> datetime:
 class TemperatureManager:
     """Manages temperature sensor reading and zone average calculations."""
 
-    def __init__(self, hass: HomeAssistant) -> None:
-        """Initialize the temperature manager."""
+    def __init__(
+        self, hass: HomeAssistant, fallback_mode: str = FALLBACK_MODE_ZONE_AVERAGE
+    ) -> None:
+        """Initialize the temperature manager.
+
+        fallback_mode decides where a room's temperature comes from when it has
+        no fresh sensor reading: "zone_average", "trv" or "last_known".
+        """
         self.hass = hass
+        if fallback_mode not in (
+            FALLBACK_MODE_ZONE_AVERAGE, FALLBACK_MODE_TRV, FALLBACK_MODE_LAST_KNOWN
+        ):
+            _LOGGER.warning(
+                "Unknown fallback_mode %r, using %r", fallback_mode, FALLBACK_MODE_ZONE_AVERAGE
+            )
+            fallback_mode = FALLBACK_MODE_ZONE_AVERAGE
+        self.fallback_mode = fallback_mode
         self.last_sensor_values: dict[str, dict[str, Any]] = {}  # entity_id -> {value, timestamp}
         self._validator = TemperatureValidator(max_change_per_min=DEFAULT_MAX_TEMP_CHANGE_PER_MIN)
 
@@ -58,10 +76,8 @@ class TemperatureManager:
         }
 
         if not sensors:
-            # No sensors, fall back to zone average
-            zone_temp = await self.get_zone_average_temperature(zone_id, all_zones)
-            metadata["source"] = "zone_average"
-            return zone_temp, metadata
+            # No sensors: use the configured fallback
+            return await self._fallback_temperature(zone_id, room_config, all_zones, metadata)
 
         valid_temps = []
         sensors_status = []
@@ -204,7 +220,54 @@ class TemperatureManager:
                     metadata["last_seen"] = last_data["timestamp"].isoformat()
                     return last_data["value"], metadata
 
-        # Fall back to zone average
+        return await self._fallback_temperature(zone_id, room_config, all_zones, metadata)
+
+    async def _fallback_temperature(
+        self, zone_id: str, room_config: dict, all_zones: dict, metadata: dict
+    ) -> tuple[float | None, dict]:
+        """Room temperature when no fresh sensor reading exists, per fallback_mode.
+
+        "trv" and "last_known" fall back to the zone average if they have no data.
+        """
+        if self.fallback_mode == FALLBACK_MODE_TRV:
+            trv_temps = []
+            for trv_id in room_config.get(CONF_TRVS, []):
+                state = self.hass.states.get(trv_id)
+                if state is None or state.state in ("unknown", "unavailable"):
+                    continue
+                try:
+                    value = float(state.attributes.get("current_temperature"))
+                except (TypeError, ValueError):
+                    continue
+                if self._validator.is_in_valid_range(value):
+                    trv_temps.append(value)
+            if trv_temps:
+                metadata["source"] = "trv"
+                return sum(trv_temps) / len(trv_temps), metadata
+
+        elif self.fallback_mode == FALLBACK_MODE_LAST_KNOWN:
+            latest: tuple[datetime, float] | None = None
+            for temp_sensor_id in self.get_sensor_entity_ids(room_config):
+                candidates = []
+                if temp_sensor_id in self.last_sensor_values:
+                    known = self.last_sensor_values[temp_sensor_id]
+                    candidates.append((known["timestamp"], known["value"]))
+                state = self.hass.states.get(temp_sensor_id)
+                if state is not None and state.state not in ("unknown", "unavailable"):
+                    try:
+                        value = float(state.state)
+                    except (TypeError, ValueError):
+                        value = None
+                    if value is not None and self._validator.is_in_valid_range(value):
+                        candidates.append((state_last_reported(state), value))
+                for candidate in candidates:
+                    if latest is None or candidate[0] > latest[0]:
+                        latest = candidate
+            if latest is not None:
+                metadata["source"] = "last_known"
+                metadata["last_seen"] = latest[0].isoformat()
+                return latest[1], metadata
+
         zone_temp = await self.get_zone_average_temperature(zone_id, all_zones)
         metadata["source"] = "zone_average"
         return zone_temp, metadata
