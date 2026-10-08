@@ -173,7 +173,7 @@
           "import_settings": "Also import settings"
         },
         "data_description": {
-          "path": "Path relative to your config folder (where configuration.yaml is), e.g. heating_manager.yaml.",
+          "path": "Path relative to your config folder (where configuration.yaml is), e.g. heating_manager.yaml. Any file name works, including backups like heating_manager.yaml.20261008.",
           "import_settings": "Apply settings written in the file (e.g. minimum_temp). Settings not in the file are left unchanged."
         }
       },
@@ -192,7 +192,6 @@
       "overlap": "This period overlaps another one on the same day.",
       "file_not_found": "File not found: {path}",
       "invalid_yaml": "{path} isn't a valid YAML mapping. Check it in the File editor.",
-      "not_yaml_file": "Choose a .yaml or .yml file.",
       "path_outside_config": "The file must be inside your Home Assistant config folder.",
       "no_zones": "No zones found in {path}. Top-level keys found: {keys}. The file needs a top-level 'zones:' section."
     }
