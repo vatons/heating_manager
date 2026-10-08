@@ -389,10 +389,6 @@ async def test_fallback_mode_trv_uses_trv_internal_temperature(hass, add_trvs, m
 # The reported incident
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason="BUG (reported incident): boiler demand on, TRV setpoint rejected for "
-    "exceeding TRV max_temp, valve stays shut and room stays cold"
-)
 async def test_incident_cold_room_trv_with_25c_limit_opens(hass, add_trvs, make_coordinator):
     trv = (await add_trvs(
         # TRV body sits by the radiator and reads 2°C above the room sensor

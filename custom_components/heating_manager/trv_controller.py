@@ -318,6 +318,11 @@ class TRVController:
             room_temp, target_temp, trv_internal_temp, needs_heating
         )
 
+        # Fit the setpoint to what this TRV accepts. Home Assistant rejects a
+        # set_temperature outside the entity's min/max range, which would leave
+        # the TRV at its previous setpoint (e.g. shut while the room is cold).
+        trv_setpoint = self._apply_trv_limits(trv_id, trv_state, trv_setpoint)
+
         # Send command to TRV
         try:
             # Check if climate domain is available
@@ -326,6 +331,20 @@ class TRVController:
                     "Climate service not yet available, skipping TRV %s update", trv_id
                 )
                 return
+
+            # A TRV that is off ignores setpoints, so switch it back to heat.
+            if (
+                trv_state is not None
+                and trv_state.state == "off"
+                and "heat" in (trv_state.attributes.get("hvac_modes") or [])
+            ):
+                _LOGGER.warning("TRV %s is off, switching it to heat", trv_id)
+                await self.hass.services.async_call(
+                    "climate",
+                    "set_hvac_mode",
+                    {"entity_id": trv_id, "hvac_mode": "heat"},
+                    blocking=True,
+                )
 
             await self.hass.services.async_call(
                 "climate",
@@ -343,5 +362,40 @@ class TRVController:
                 trv_setpoint - target_temp
             )
         except Exception as err:
-            # Don't let TRV errors break the entire coordinator update
-            _LOGGER.warning("Error setting TRV %s temperature: %s", trv_id, err)
+            # Don't let TRV errors break the entire coordinator update, but make
+            # them visible: an undelivered setpoint means the TRV is uncontrolled.
+            _LOGGER.error("Error setting TRV %s temperature: %s", trv_id, err)
+
+    @staticmethod
+    def _apply_trv_limits(trv_id: str, trv_state: Any, setpoint: float) -> float:
+        """Round a setpoint to the TRV's step and clamp it to its min/max range."""
+        if trv_state is None:
+            return setpoint
+
+        def _attr_float(name: str) -> float | None:
+            try:
+                value = trv_state.attributes.get(name)
+                return float(value) if value is not None else None
+            except (ValueError, TypeError):
+                return None
+
+        original = setpoint
+
+        step = _attr_float("target_temp_step")
+        if step is not None and step > 0:
+            setpoint = round(round(setpoint / step) * step, 2)
+
+        min_temp = _attr_float("min_temp")
+        max_temp = _attr_float("max_temp")
+        if max_temp is not None and setpoint > max_temp:
+            setpoint = max_temp
+        if min_temp is not None and setpoint < min_temp:
+            setpoint = min_temp
+
+        if setpoint != original:
+            _LOGGER.debug(
+                "TRV %s: setpoint %.2f°C adjusted to %.2f°C "
+                "(step=%s, min=%s, max=%s)",
+                trv_id, original, setpoint, step, min_temp, max_temp,
+            )
+        return setpoint

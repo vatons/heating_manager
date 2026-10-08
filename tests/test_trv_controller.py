@@ -184,10 +184,6 @@ async def test_offset_info_reports_trv_state(hass, add_trvs, ctrl):
     assert info[TRV]["trv_setpoint"] == 23.0
 
 
-@pytest.mark.xfail(
-    reason="BUG: setpoint above the TRV's max_temp is rejected by HA and the error "
-    "swallowed, leaving the TRV at its previous (possibly closed) setpoint"
-)
 async def test_setpoint_above_trv_max_is_clamped_not_dropped(hass, add_trvs, ctrl):
     # Cold room (deficit 4.5 -> +5 boost) and a TRV limited to 25°C, currently closed
     trvs = await add_trvs(
@@ -199,10 +195,6 @@ async def test_setpoint_above_trv_max_is_clamped_not_dropped(hass, add_trvs, ctr
     assert trv.valve_open
 
 
-@pytest.mark.xfail(
-    reason="BUG: setpoint below the TRV's min_temp is rejected by HA and dropped, "
-    "so the TRV stays open when it should close"
-)
 async def test_setpoint_below_trv_min_is_clamped_not_dropped(hass, add_trvs, ctrl):
     # Room overshooting a 5°C frost target -> controller asks for 5°C; TRV min is 7
     trvs = await add_trvs(
@@ -213,9 +205,6 @@ async def test_setpoint_below_trv_min_is_clamped_not_dropped(hass, add_trvs, ctr
     assert not trvs[TRV].valve_open
 
 
-@pytest.mark.xfail(
-    reason="BUG: TRV hvac_mode is never checked; a TRV in OFF ignores every setpoint"
-)
 async def test_trv_in_off_mode_is_switched_to_heat(hass, add_trvs, ctrl):
     trvs = await add_trvs(
         FakeTRV("room_trv", current_temperature=16.0, hvac_mode=HVACMode.OFF)
@@ -225,7 +214,6 @@ async def test_trv_in_off_mode_is_switched_to_heat(hass, add_trvs, ctrl):
     assert trvs[TRV].valve_open
 
 
-@pytest.mark.xfail(reason="BUG: setpoints are not rounded to the TRV's target_temperature_step")
 async def test_setpoint_respects_trv_step(hass, add_trvs, ctrl):
     trvs = await add_trvs(
         FakeTRV("room_trv", current_temperature=18.3, target_temperature_step=0.5)
@@ -233,3 +221,63 @@ async def test_setpoint_respects_trv_step(hass, add_trvs, ctrl):
     await ctrl.set_trv_temperature("z", "r", TRV, 19.5, 17.9, True)
     sent = trvs[TRV].set_temperature_calls[-1]
     assert sent * 2 == round(sent * 2)
+
+
+@pytest.mark.parametrize(
+    ("computed", "step", "expected"),
+    [(22.3, 0.5, 22.5), (22.2, 0.5, 22.0), (22.26, 0.1, 22.3), (22.3, 1.0, 22.0)],
+)
+async def test_setpoint_rounded_to_nearest_step(hass, add_trvs, ctrl, computed, step, expected):
+    await add_trvs(FakeTRV("room_trv", target_temperature_step=step))
+    state = hass.states.get(TRV)
+    assert ctrl._apply_trv_limits(TRV, state, computed) == pytest.approx(expected)
+
+
+async def test_rounding_cannot_escape_trv_range(hass, add_trvs, ctrl):
+    await add_trvs(FakeTRV("room_trv", min_temp=5.5, max_temp=24.5, target_temperature_step=1.0))
+    state = hass.states.get(TRV)
+    assert ctrl._apply_trv_limits(TRV, state, 24.6) == 24.5     # 25.0 after rounding
+    assert ctrl._apply_trv_limits(TRV, state, 5.2) == 5.5       # 5.0 after rounding
+
+
+async def test_limits_ignored_when_trv_state_unknown(ctrl):
+    assert ctrl._apply_trv_limits(TRV, None, 31.3) == 31.3
+
+
+async def test_trv_without_step_is_not_rounded(hass, add_trvs, ctrl):
+    await add_trvs(FakeTRV("room_trv"))
+    assert ctrl._apply_trv_limits(TRV, hass.states.get(TRV), 22.37) == 22.37
+
+
+async def test_trv_in_auto_mode_is_left_alone(hass, add_trvs, ctrl):
+    trvs = await add_trvs(FakeTRV("room_trv", current_temperature=16.0, hvac_mode=HVACMode.AUTO))
+    await ctrl.set_trv_temperature("z", "r", TRV, 20.0, 16.0, True)
+    assert trvs[TRV].hvac_mode_calls == []
+    assert trvs[TRV].set_temperature_calls
+
+
+async def test_trv_already_heating_gets_no_mode_call(hass, add_trvs, ctrl):
+    trvs = await add_trvs(FakeTRV("room_trv", current_temperature=16.0))
+    await ctrl.set_trv_temperature("z", "r", TRV, 20.0, 16.0, True)
+    assert trvs[TRV].hvac_mode_calls == []
+
+
+async def test_off_trv_without_heat_mode_is_not_switched(hass, add_trvs, ctrl):
+    trv = FakeTRV("room_trv", current_temperature=16.0, hvac_mode=HVACMode.OFF)
+    trv._attr_hvac_modes = [HVACMode.OFF, HVACMode.AUTO]
+    trvs = await add_trvs(trv)
+    await ctrl.set_trv_temperature("z", "r", TRV, 20.0, 16.0, True)
+    assert trvs[TRV].hvac_mode_calls == []
+    assert trvs[TRV].set_temperature_calls
+
+
+async def test_failure_switching_mode_is_logged_not_raised(hass, add_trvs, ctrl, caplog):
+    trv = FakeTRV("room_trv", current_temperature=16.0, hvac_mode=HVACMode.OFF)
+
+    async def _fail(hvac_mode):
+        raise RuntimeError("zigbee timeout")
+
+    trv.async_set_hvac_mode = _fail
+    await add_trvs(trv)
+    await ctrl.set_trv_temperature("z", "r", TRV, 20.0, 16.0, True)
+    assert "Error setting TRV climate.room_trv" in caplog.text
