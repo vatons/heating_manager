@@ -300,3 +300,29 @@ async def test_setting_room_to_its_displayed_target_changes_nothing(hass, setup_
     state = hass.states.get(ROOM)
     assert state.attributes[ATTR_TEMPERATURE] == 18.0
     assert state.attributes["manual_override"]["active"] is False
+
+
+async def test_unquoted_schedule_times_in_yaml_file(hass, setup_hm, tmp_path):
+    """A hand-written config with unquoted times must load and schedule correctly."""
+    path = tmp_path / "unquoted.yaml"
+    path.write_text(
+        "zones:\n"
+        "  downstairs:\n"
+        "    name: Downstairs\n"
+        "    schedule:\n"
+        "      weekday:\n"
+        "        - {start: 06:30, end: 21:00, temperature: 20.5}\n"
+        "      weekend:\n"
+        "        - {start: 7:00, end: 23:30, temperature: 20.5}\n"
+        "    rooms:\n"
+        "      lounge:\n"
+        "        name: Lounge\n"
+        "        trvs: [climate.lounge_trv]\n"
+        "        sensors: [sensor.lounge]\n"
+    )
+    ok, _ = await setup_hm(config_path=str(path))
+    assert ok
+    assert coord(hass).last_update_success
+    assert hass.states.get(ROOM).attributes[ATTR_TEMPERATURE] == 20.5
+    schedule = hass.states.get(ZONE).attributes["schedule"]
+    assert schedule["current_period"]["end"] == "21:00"

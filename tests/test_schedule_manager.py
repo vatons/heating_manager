@@ -90,7 +90,6 @@ def test_midnight_spanning_period(sm):
     assert sm.get_scheduled_temperature(cfg, at(WEEKDAY, 12)) == 10.0
 
 
-@pytest.mark.xfail(reason="BUG: start == end matches nothing; 00:00-00:00 should mean all day")
 def test_00_00_to_00_00_means_all_day(sm):
     """A period from midnight to midnight should cover the whole day."""
     cfg = {"schedule": {"weekday": [{"start": "00:00", "end": "00:00", "temperature": 19.0}]}}
@@ -104,7 +103,6 @@ def test_00_00_to_23_59_leaves_final_minute_uncovered(sm):
     assert sm.get_scheduled_temperature(cfg, at(WEEKDAY, 23, 59)) == 10.0
 
 
-@pytest.mark.xfail(reason="BUG: times are compared as strings, so '6:30' sorts after '21:00'")
 def test_unpadded_times_are_compared_correctly(sm):
     """YAML like `start: "6:30"` is easy to write; it must not break string comparison."""
     cfg = {"schedule": {"weekday": [{"start": "6:30", "end": "21:00", "temperature": 19.5}]}}
@@ -113,10 +111,6 @@ def test_unpadded_times_are_compared_correctly(sm):
     assert sm.get_scheduled_temperature(cfg, at(WEEKDAY, 5)) == 10.0
 
 
-@pytest.mark.xfail(
-    raises=TypeError,
-    reason="BUG: unquoted YAML times become ints (21:00 -> 1260) and crash the update",
-)
 def test_unquoted_yaml_times_are_supported(sm):
     """Unquoted `start: 06:30` is parsed by YAML 1.1 as the integer 390 (sexagesimal)."""
     import yaml
@@ -152,3 +146,84 @@ def test_first_matching_period_wins_for_overlaps(sm):
 )
 def test_is_time_in_period(sm, start, end, current, expected):
     assert sm.is_time_in_period(start, end, current) is expected
+
+
+@pytest.mark.parametrize(
+    ("value", "minutes"),
+    [
+        ("06:30", 390), ("6:30", 390), ("00:00", 0), ("23:59", 1439), ("24:00", 1440),
+        ("21:00:00", 1260), (" 07:15 ", 435), (1260, 1260), (0, 0),
+        ("25:00", None), ("12:60", None), ("noon", None), ("", None), (None, None),
+        (-5, None), (1441, None), (True, None), (19.5, None),
+    ],
+)
+def test_parse_time(value, minutes):
+    from custom_components.heating_manager.schedule_manager import parse_time
+
+    assert parse_time(value) == minutes
+
+
+def test_end_of_day_24_00(sm):
+    cfg = {"schedule": {"weekday": [{"start": "18:00", "end": "24:00", "temperature": 20.0}]}}
+    assert sm.get_scheduled_temperature(cfg, at(WEEKDAY, 23, 59)) == 20.0
+    assert sm.get_scheduled_temperature(cfg, at(WEEKDAY, 17, 59)) == 10.0
+
+
+def test_invalid_periods_skipped_and_warned_once(sm, caplog):
+    cfg = {
+        "name": "Upstairs",
+        "schedule": {
+            "weekday": [
+                {"start": "07:00", "end": "25:99", "temperature": 30.0},
+                {"start": "06:00", "temperature": 30.0},
+                "garbage",
+                {"start": "06:00", "end": "22:00", "temperature": 19.0},
+            ]
+        },
+    }
+    for _ in range(3):
+        assert sm.get_scheduled_temperature(cfg, at(WEEKDAY, 12)) == 19.0
+    warnings = [r for r in caplog.records if "invalid start/end time" in r.getMessage()]
+    assert len(warnings) == 3
+
+
+@pytest.mark.parametrize("schedule", [None, "oops", {"weekday": "oops"}])
+def test_malformed_schedule_uses_minimum(sm, schedule):
+    assert sm.get_scheduled_temperature({"schedule": schedule}, at(WEEKDAY, 12)) == 10.0
+
+
+def test_period_info_current_and_next(sm):
+    current, nxt = sm.get_period_info(USER_SCHEDULE, at(WEEKDAY, 7))
+    assert current == {"start": "06:00", "end": "08:00", "temperature": 19.5}
+    assert nxt == {"start": "08:00", "end": "16:00", "temperature": 18.0}
+
+
+def test_period_info_next_is_earliest_upcoming_even_if_unsorted(sm):
+    cfg = {"schedule": {"weekday": [
+        {"start": "18:00", "end": "22:00", "temperature": 20.0},
+        {"start": "13:00", "end": "15:00", "temperature": 19.0},
+    ]}}
+    current, nxt = sm.get_period_info(cfg, at(WEEKDAY, 12))
+    assert current is None
+    assert nxt["start"] == "13:00"
+
+
+def test_period_info_rolls_over_to_tomorrow(sm):
+    friday = local_dt(2026, 1, 16, 22)
+    current, nxt = sm.get_period_info(USER_SCHEDULE, friday)
+    assert current["start"] == "21:00"
+    assert nxt == {"start": "00:00", "end": "08:00", "temperature": 15.0, "tomorrow": True}
+
+
+def test_period_info_normalises_unquoted_yaml_times(sm):
+    import yaml
+
+    cfg = yaml.safe_load(
+        "schedule:\n  weekday:\n    - {start: 06:30, end: 21:00, temperature: 19.5}\n"
+    )
+    current, _ = sm.get_period_info(cfg, at(WEEKDAY, 12))
+    assert current == {"start": "06:30", "end": "21:00", "temperature": 19.5}
+
+
+def test_period_info_empty_schedule(sm):
+    assert sm.get_period_info({}, at(WEEKDAY, 12)) == (None, None)

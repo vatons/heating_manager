@@ -357,23 +357,24 @@ async def test_watchdog_survives_failing_trv(hass, add_trvs, make_coordinator, _
 # Robustness
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason="BUG: a bad schedule in one zone raises inside the update loop and takes "
-    "down every zone (no data, all TRVs unmanaged)"
-)
 async def test_bad_schedule_in_one_zone_does_not_break_others(hass, add_trvs, make_coordinator):
     await add_trvs(FakeTRV("room_trv"))
     set_temp(hass, SENSOR, 17.0)
     cfg = single_room_config()
     cfg["zones"]["zone_2"] = {
-        # end: 21:00 unquoted in YAML -> int 1260
-        "schedule": {"weekday": [{"start": "06:30", "end": 1260, "temperature": 19}]},
-        "rooms": {"x": make_room("X", [], [SENSOR])},
+        "schedule": {"weekday": [
+            {"start": "06:30", "end": "25:99", "temperature": 21},
+            {"start": "06:30", "temperature": 21},
+            "not a period",
+        ]},
+        "rooms": {"x": make_room("X", [], ["sensor.x"])},
     }
+    set_temp(hass, "sensor.x", 17.0)
     coordinator = make_coordinator(cfg)
     await coordinator.async_refresh()
     assert coordinator.last_update_success
     assert coordinator.data["zone_1"]["rooms"]["room"]["needs_heating"] is True
+    assert coordinator.data["zone_2"]["rooms"]["x"]["target_temperature"] == 10.0    # minimum
 
 
 @pytest.mark.xfail(reason="BUG: fallback_mode is read from config but never used")

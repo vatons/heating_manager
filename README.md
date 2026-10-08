@@ -775,8 +775,12 @@ Can be set globally or overridden per-zone in `heating_manager.yaml`.
 
 ### Schedule Time Format
 
-- Use 24-hour format: "HH:MM"
-- Ensure times don't overlap
+- Use 24-hour format: "HH:MM" (quoted or unquoted; "6:30" and "06:30" are both fine)
+- `end` is exclusive; use "24:00" or "00:00" to run until midnight
+- A period with the same start and end (e.g. "00:00" to "00:00") covers the whole day
+- A period ending before it starts (e.g. "22:00" to "06:00") spans midnight
+- Ensure times don't overlap; if they do, the first matching period wins
+- Periods with invalid times are ignored and a warning is logged
 - When no schedule is active, uses `minimum_temp` setting
 
 ## Development
