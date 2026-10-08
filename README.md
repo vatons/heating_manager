@@ -239,6 +239,12 @@ The zone climate entity attributes include:
 - `schedule.current_period` - Current schedule period (`start`, `end`, `temperature`)
 - `schedule.next_period` - Next schedule period
 
+#### Boiler protection (minimum on/off times)
+
+To stop the boiler short-cycling, set **Minimum boiler on time** and **Minimum boiler off time** in **Configure → Advanced settings** (minutes, 0 = off, the default). Once a zone starts calling for heat it keeps calling for at least the on time; once it stops, it waits at least the off time before calling again. The global entity is held the same way, so zones taking turns can't cycle a shared boiler. TRVs aren't held: a room that's warm enough still closes its TRV.
+
+The zone entity shows `heating_demand_requested` (what the rooms want now) next to `heating_demand` (what's being signalled), and `demand_hold` (`min_on`, `min_off` or null) explains any difference. The global entity has `demand_hold` too.
+
 #### Monitoring-only zones
 
 A zone can be set to **monitoring only** (**Configure → Zones, rooms and schedules → (zone) → Name, demand mode and monitoring**). Use this for rooms you want to see but not heat, such as a bathroom or cloakroom with sensors but no controllable radiators. A monitoring-only zone:
@@ -307,7 +313,7 @@ The global climate entity attributes include:
 
 ### Temperature Sensor Configuration
 
-Pick a room's temperature sensors in its room form (**Configure → Zones, rooms and schedules → (zone) → Rooms → (room)**). Several sensors in one room are averaged.
+Pick a room's temperature sensors in its room form (**Configure → Zones, rooms and schedules → (zone) → Rooms → (room)**). With one or two fresh sensors the room uses their average; with three or more it uses the **median**, so a single odd sensor (one near a fridge, oven or window) can't skew the room. Sensors can report in °C or °F; readings are converted.
 
 A sensor counts as fresh if it reported within the last 30 minutes, using Home Assistant's own report time, so a sensor holding a steady temperature is still fresh. For sensors that expose a separate timestamp entity (for example Zigbee2MQTT's `last_seen`), tick **Set 'last seen' sensors** in the room form to map each sensor to it.
 
@@ -473,8 +479,13 @@ template:
 - Verify sensors are updating (check state in Developer Tools)
 - Check logs for errors: `Settings > System > Logs`
 
+### Repair notice: "Heating Manager can't find some entities"
+
+A TRV or sensor used by a room has been missing (renamed, deleted, or its integration didn't load) or disabled for 10 minutes. The notice lists each one with its room. Update the room in **Configure**, or re-enable/restore the entity; the notice clears by itself. Devices that are merely offline (state "unavailable") aren't reported.
+
 ### TRVs Not Responding
 
+- Each TRV can belong to one room only. Configure rejects a TRV already used elsewhere; in an import, a TRV listed in several rooms is kept in the first and a warning is shown
 - Ensure TRV entity IDs in config match actual entities
 - Check TRV is online and responding to Home Assistant
 - Verify the climate integration for your TRVs supports `set_temperature` service
@@ -661,13 +672,19 @@ Set the default in **Configure → Settings**; override it per zone in the zone'
 
 ### Fallback Modes
 
-Set in **Configure → Settings → When a room's sensors are unavailable**. Used when a room has no sensor reading from the last 30 minutes, or has no sensors configured:
+Set in **Configure → Settings → When a room's sensors are unavailable**. Used when a room's sensors have had no reading in the last 30 minutes:
 
 - `zone_average`: Use the average of the zone's other fresh sensors (default, recommended)
 - `trv`: Use the average internal temperature of the room's TRVs. These usually read warmer than the room
 - `last_known`: Use the room's most recent sensor reading, however old
 
 If `trv` or `last_known` has no data, the zone average is used. TRV offsets are only learned from the room's own sensors, never from a fallback temperature.
+
+A room with TRVs but **no sensors configured** always uses its TRVs' own temperature (then the zone average), whatever this setting, so it still calls for heat on its own. TRV sensors usually read warmer than the room, so expect such rooms to run a little cool; a room sensor is better.
+
+### Fahrenheit
+
+Heating Manager works with Home Assistant set to °F. Sensor readings and TRV temperatures, limits and step sizes are converted automatically, and the room, zone and global climate entities display °F. Schedules, offsets and the temperatures in **Configure** are entered in °C. The `set_boost` service's `temperature` is in your unit system.
 
 ### Schedule Time Format
 

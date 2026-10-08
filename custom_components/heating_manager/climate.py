@@ -15,6 +15,7 @@ from homeassistant.components.climate import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import (
     config_validation as cv,
     device_registry as dr,
@@ -33,6 +34,8 @@ from .const import (
     SERVICE_SET_BOOST,
 )
 from .coordinator import HeatingManagerCoordinator
+from .entry_data import GLOBAL_UNIQUE_ID, room_unique_id, zone_unique_id
+from .units import from_celsius, system_unit, to_celsius
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -66,9 +69,8 @@ async def async_setup_entry(
         SERVICE_SET_BOOST,
         {
             vol.Optional(ATTR_BOOST_DURATION): cv.positive_int,
-            vol.Optional(ATTR_BOOST_TEMP): vol.All(
-                vol.Coerce(float), vol.Range(min=5.0, max=MAX_BOOST_TEMP)
-            ),
+            # In Home Assistant's unit system (°C or °F); range-checked after conversion
+            vol.Optional(ATTR_BOOST_TEMP): vol.Coerce(float),
         },
         "async_set_boost_service",
     )
@@ -150,7 +152,7 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         # Named after the room, within the zone's device (e.g. "Downstairs Lounge")
         self._attr_has_entity_name = True
         self._attr_name = room_config.get("name", room_id)
-        self._attr_unique_id = f"{DOMAIN}_{zone_id}_{room_id}"
+        self._attr_unique_id = room_unique_id(zone_id, room_id)
         self._attr_device_info = _zone_device_info(coordinator, zone_id)
 
     @property
@@ -403,6 +405,13 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         self, duration: int | None = None, temperature: float | None = None
     ) -> None:
         """Service call to set boost for this room."""
+        if temperature is not None:
+            temperature = to_celsius(temperature, system_unit(self.hass))
+            if not 5.0 <= temperature <= MAX_BOOST_TEMP:
+                raise ServiceValidationError(
+                    f"Boost temperature must be between {from_celsius(5.0, system_unit(self.hass)):g} and "
+                    f"{from_celsius(MAX_BOOST_TEMP, system_unit(self.hass)):g} {system_unit(self.hass)}"
+                )
         await self.coordinator.set_boost(
             self._zone_id, self._room_id, duration, temperature
         )
@@ -441,7 +450,7 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
         # The zone's main entity: takes the zone device's name (e.g. "Downstairs")
         self._attr_has_entity_name = True
         self._attr_name = None
-        self._attr_unique_id = f"{DOMAIN}_{zone_id}_zone"
+        self._attr_unique_id = zone_unique_id(zone_id)
         self._attr_device_info = _zone_device_info(coordinator, zone_id)
 
     @property
@@ -562,6 +571,8 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
 
             # Heating status
             "heating_demand": zone_data.get("heating_demand", False),
+            "heating_demand_requested": zone_data.get("heating_demand_requested", False),
+            "demand_hold": zone_data.get("demand_hold"),
             "heating_demand_mode": zone_data.get("heating_demand_mode", "any_room"),
             "monitoring_only": zone_data.get("monitoring_only", False),
             "away_mode": self.coordinator.away_mode,
@@ -676,7 +687,7 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
         # Takes the "Heating Manager" device name
         self._attr_has_entity_name = True
         self._attr_name = None
-        self._attr_unique_id = f"{DOMAIN}_global"
+        self._attr_unique_id = GLOBAL_UNIQUE_ID
         self._attr_device_info = _global_device_info()
 
     @property
@@ -740,10 +751,9 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
         if not self.coordinator.data:
             return HVACAction.IDLE
 
-        # OR logic: if any zone has heating demand, return HEATING
-        for zone_data in self.coordinator.data.values():
-            if zone_data.get("heating_demand", False):
-                return HVACAction.HEATING
+        # Any zone demanding heat, after the minimum boiler on/off times
+        if self.coordinator.global_heating_demand:
+            return HVACAction.HEATING
 
         return HVACAction.IDLE
 
@@ -800,6 +810,7 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
             # System status
             "away_mode": self.coordinator.away_mode,
             "total_zones": len(self.coordinator.data),
+            "demand_hold": self.coordinator.global_demand_hold,
             "zones_demanding_heat": len(zones_needing_heat),
 
             # Heating demand

@@ -14,9 +14,13 @@ import yaml
 
 from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
-from homeassistant.helpers import config_validation as cv, issue_registry as ir
+from homeassistant.helpers import (
+    config_validation as cv,
+    entity_registry as er,
+    issue_registry as ir,
+)
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
@@ -30,6 +34,8 @@ from .const import (
     CONF_FALLBACK_MODE,
     CONF_FROST_PROTECTION_TEMP,
     CONF_HEATING_DEADBAND,
+    CONF_MIN_BOILER_OFF_TIME,
+    CONF_MIN_BOILER_ON_TIME,
     CONF_MINIMUM_TEMP,
     CONF_TRV_COOLDOWN_OFFSET,
     CONF_TRV_OFFSET_EMA_ALPHA,
@@ -41,7 +47,7 @@ from .const import (
     SERVICE_SET_MODE,
 )
 from .coordinator import HeatingManagerCoordinator
-from .entry_data import options_to_runtime, yaml_to_options
+from .entry_data import legacy_unique_id_map, options_to_runtime, yaml_to_options
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -159,6 +165,7 @@ async def _async_import_yaml(hass: HomeAssistant, conf: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: HeatingManagerConfigEntry) -> bool:
     """Set up Heating Manager from a config entry."""
     config, settings = options_to_runtime(dict(entry.options))
+    _async_migrate_unique_ids(hass, config)
 
     coordinator = HeatingManagerCoordinator(
         hass,
@@ -178,6 +185,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HeatingManagerConfigEntr
         analytics_history_size=settings[CONF_ANALYTICS_HISTORY_SIZE],
         analytics_min_samples=settings[CONF_ANALYTICS_MIN_SAMPLES],
         derivative_smoothing=settings[CONF_DERIVATIVE_SMOOTHING],
+        min_boiler_on_time=settings[CONF_MIN_BOILER_ON_TIME],
+        min_boiler_off_time=settings[CONF_MIN_BOILER_OFF_TIME],
         config_entry=entry,
     )
     await coordinator.async_config_entry_first_refresh()
@@ -186,6 +195,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: HeatingManagerConfigEntr
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     return True
+
+
+@callback
+def _async_migrate_unique_ids(hass: HomeAssistant, config: dict) -> None:
+    """Move entities from pre-2.2 unique ids to the current ones, keeping their entity ids.
+
+    Includes entities first created by the old YAML platform (no config entry).
+    """
+    ent_reg = er.async_get(hass)
+    mapping = legacy_unique_id_map(config.get("zones", {}))
+    for entity in list(ent_reg.entities.values()):
+        if entity.platform != DOMAIN or entity.domain != Platform.CLIMATE:
+            continue
+        new_unique_id = mapping.get(entity.unique_id)
+        if new_unique_id is None:
+            continue
+        if ent_reg.async_get_entity_id(Platform.CLIMATE, DOMAIN, new_unique_id):
+            continue
+        _LOGGER.debug("Migrating %s unique id %s -> %s", entity.entity_id, entity.unique_id, new_unique_id)
+        ent_reg.async_update_entity(entity.entity_id, new_unique_id=new_unique_id)
 
 
 async def _async_reload_entry(hass: HomeAssistant, entry: HeatingManagerConfigEntry) -> None:
@@ -200,4 +229,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: HeatingManagerConfigEnt
         coordinator = entry.runtime_data
         await coordinator.async_shutdown()
         await coordinator.async_save_state()
+        ir.async_delete_issue(hass, DOMAIN, "missing_entities")
     return unloaded

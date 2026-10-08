@@ -25,6 +25,8 @@ CONF_TRV_OVERSHOOT_MAX = "trv_overshoot_max"
 CONF_TRV_OVERSHOOT_THRESHOLD = "trv_overshoot_threshold"
 CONF_TRV_COOLDOWN_OFFSET = "trv_cooldown_offset"
 CONF_TRV_OFFSET_EMA_ALPHA = "trv_offset_ema_alpha"
+CONF_MIN_BOILER_ON_TIME = "min_boiler_on_time"
+CONF_MIN_BOILER_OFF_TIME = "min_boiler_off_time"
 
 # Heating Analytics Configuration
 CONF_ANALYTICS_ENABLED = "analytics_enabled"
@@ -57,6 +59,8 @@ DEFAULT_TRV_OVERSHOOT_THRESHOLD = 0.3  # degrees (°C)
 DEFAULT_TRV_COOLDOWN_OFFSET = 1.0  # degrees (°C)
 DEFAULT_TRV_OFFSET_EMA_ALPHA = 0.15   # EMA smoothing factor (0.1=stable, 0.2=responsive)
 DEFAULT_TRV_DEFAULT_OFFSET = 0.0      # Initial assumed offset when no EMA history exists
+DEFAULT_MIN_BOILER_ON_TIME = 0        # minutes; 0 = no minimum (heat demand follows rooms immediately)
+DEFAULT_MIN_BOILER_OFF_TIME = 0       # minutes
 
 # Analytics defaults
 DEFAULT_ANALYTICS_ENABLED = True

@@ -40,11 +40,14 @@ from .entry_data import (
     SETTINGS_BY_KEY,
     SettingSpec,
     coerce_setting,
+    dedupe_trvs,
     format_period,
     new_options,
     new_zone,
     period_minutes,
+    room_label,
     sort_periods,
+    trv_owner,
     unique_id_for,
     yaml_to_options,
 )
@@ -263,6 +266,14 @@ class HeatingManagerOptionsFlow(OptionsFlow):
                 f"- {zone.get(CONF_NAME, zone_id)}: {rooms} room(s), "
                 f"{periods} schedule period(s){replaces}"
             )
+        merged = copy.deepcopy(self._zones)
+        merged.update(copy.deepcopy(pending[OPT_ZONES]))
+        duplicates = dedupe_trvs(merged)
+        warnings = (
+            "TRVs in more than one room (each will only control the first):\n"
+            + "\n".join(f"- {d}" for d in duplicates)
+            if duplicates else ""
+        )
         return self.async_show_form(
             step_id="import_yaml_confirm",
             data_schema=vol.Schema({vol.Required(CONF_CONFIRM, default=True): bool}),
@@ -270,6 +281,7 @@ class HeatingManagerOptionsFlow(OptionsFlow):
                 "path": pending[CONF_PATH],
                 "zones": "\n".join(zone_lines),
                 "settings": str(len(pending[OPT_SETTINGS])),
+                "warnings": warnings,
             },
         )
 
@@ -407,6 +419,7 @@ class HeatingManagerOptionsFlow(OptionsFlow):
         rooms = self._zone[CONF_ROOMS]
         room = rooms.get(self._room_id) if self._room_id else None
         errors: dict[str, str] = {}
+        placeholders = {"zone": self._zone.get(CONF_NAME, self._zone_id), "trv_conflict": ""}
         if user_input is not None:
             if room is not None and user_input.get(CONF_DELETE):
                 del rooms[self._room_id]
@@ -419,6 +432,15 @@ class HeatingManagerOptionsFlow(OptionsFlow):
                 errors[CONF_NAME] = "name_required"
             elif not trvs and not sensor_ids:
                 errors["base"] = "room_empty"
+            elif conflicts := [
+                (trv_id, owner)
+                for trv_id in trvs
+                if (owner := trv_owner(self._zones, trv_id, (self._zone_id, self._room_id)))
+            ]:
+                errors[CONF_TRVS] = "trv_in_use"
+                placeholders["trv_conflict"] = ", ".join(
+                    f"{trv_id} ({room_label(self._zones, *owner)})" for trv_id, owner in conflicts
+                )
             else:
                 if room is None:
                     # "zone" is reserved: the zone entity's unique id ends in "_zone"
@@ -471,7 +493,7 @@ class HeatingManagerOptionsFlow(OptionsFlow):
             step_id="room",
             data_schema=vol.Schema(fields),
             errors=errors,
-            description_placeholders={"zone": self._zone.get(CONF_NAME, self._zone_id)},
+            description_placeholders=placeholders,
         )
 
     async def async_step_room_last_seen(

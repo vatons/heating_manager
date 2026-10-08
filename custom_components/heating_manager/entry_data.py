@@ -27,6 +27,7 @@ Zone and room ids are kept stable (they form the entities' unique ids).
 """
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import logging
 from typing import Any
@@ -44,6 +45,8 @@ from .const import (
     CONF_FROST_PROTECTION_TEMP,
     CONF_HEATING_DEADBAND,
     CONF_HEATING_DEMAND_MODE,
+    CONF_MIN_BOILER_OFF_TIME,
+    CONF_MIN_BOILER_ON_TIME,
     CONF_MINIMUM_TEMP,
     CONF_MONITORING_ONLY,
     CONF_ROOMS,
@@ -71,6 +74,8 @@ from .const import (
     DEFAULT_FROST_PROTECTION_TEMP,
     DEFAULT_HEATING_DEADBAND,
     DEFAULT_HEATING_DEMAND_MODE,
+    DEFAULT_MIN_BOILER_OFF_TIME,
+    DEFAULT_MIN_BOILER_ON_TIME,
     DEFAULT_MINIMUM_TEMP,
     DEFAULT_TRV_COOLDOWN_OFFSET,
     DEFAULT_TRV_OFFSET_EMA_ALPHA,
@@ -122,6 +127,8 @@ SETTINGS: tuple[SettingSpec, ...] = (
     SettingSpec(CONF_BOOST_DURATION, DEFAULT_BOOST_DURATION, "int", minimum=1, maximum=480, step=1, unit="min"),
     # Advanced
     SettingSpec(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL, "int", True, 10, 600, 1, "s"),
+    SettingSpec(CONF_MIN_BOILER_ON_TIME, DEFAULT_MIN_BOILER_ON_TIME, "int", True, 0, 30, 1, "min"),
+    SettingSpec(CONF_MIN_BOILER_OFF_TIME, DEFAULT_MIN_BOILER_OFF_TIME, "int", True, 0, 30, 1, "min"),
     SettingSpec(CONF_TRV_OVERSHOOT_ENABLED, DEFAULT_TRV_OVERSHOOT_ENABLED, "bool", True),
     SettingSpec(CONF_TRV_OVERSHOOT_MAX, DEFAULT_TRV_OVERSHOOT_MAX, "float", True, 0, 10, 0.5, "°C"),
     SettingSpec(CONF_TRV_OVERSHOOT_THRESHOLD, DEFAULT_TRV_OVERSHOOT_THRESHOLD, "float", True, 0, 3, 0.1, "°C"),
@@ -211,6 +218,91 @@ def sort_periods(periods: list[dict]) -> list[dict]:
 
 def format_period(period: dict) -> str:
     return f"{period[CONF_START]}–{period[CONF_END]}: {period[CONF_TEMPERATURE]:g}°C"
+
+
+# ---------------------------------------------------------------------------
+# TRVs shared between rooms
+# ---------------------------------------------------------------------------
+# A TRV in two rooms gets two conflicting setpoints every update and flips
+# between them, so each TRV belongs to the first room (in config order) only.
+
+def trv_owner(zones: dict, trv_id: str, exclude: tuple[str, str] | None = None) -> tuple[str, str] | None:
+    """(zone_id, room_id) of the room that has trv_id, ignoring exclude."""
+    for zone_id, zone in zones.items():
+        rooms = zone.get(CONF_ROOMS) if isinstance(zone, dict) else None
+        if not isinstance(rooms, dict):
+            continue
+        for room_id, room in rooms.items():
+            if (zone_id, room_id) != exclude and isinstance(room, dict) and trv_id in (room.get(CONF_TRVS) or []):
+                return zone_id, room_id
+    return None
+
+
+def room_label(zones: dict, zone_id: str, room_id: str) -> str:
+    zone = zones.get(zone_id, {})
+    room = zone.get(CONF_ROOMS, {}).get(room_id, {})
+    return f"{zone.get('name', zone_id)} / {room.get('name', room_id)}"
+
+
+def dedupe_trvs(zones: dict) -> list[str]:
+    """Remove TRVs already used by an earlier room (mutates zones). Returns descriptions."""
+    seen: dict[str, tuple[str, str]] = {}
+    removed = []
+    for zone_id, zone in zones.items():
+        rooms = zone.get(CONF_ROOMS) if isinstance(zone, dict) else None
+        if not isinstance(rooms, dict):
+            continue
+        for room_id, room in rooms.items():
+            if not isinstance(room, dict):
+                continue
+            kept = []
+            for trv_id in room.get(CONF_TRVS) or []:
+                if trv_id in seen:
+                    removed.append(
+                        f"{trv_id} is already in {room_label(zones, *seen[trv_id])}; "
+                        f"not used for {room_label(zones, zone_id, room_id)}"
+                    )
+                else:
+                    seen[trv_id] = (zone_id, room_id)
+                    kept.append(trv_id)
+            if CONF_TRVS in room:
+                room[CONF_TRVS] = kept
+    return removed
+
+
+# ---------------------------------------------------------------------------
+# Entity unique ids
+# ---------------------------------------------------------------------------
+# Prefixed and ':'-separated so zone and room ids can't run together: the old
+# "{domain}_{zone}_{room}" form made zone "up"/room "stairs_bed" and zone
+# "up_stairs"/room "bed" the same id, so one room's entity was dropped.
+
+GLOBAL_UNIQUE_ID = "heating_manager:global"
+
+
+def zone_unique_id(zone_id: str) -> str:
+    return f"heating_manager:zone:{zone_id}"
+
+
+def room_unique_id(zone_id: str, room_id: str) -> str:
+    return f"heating_manager:room:{zone_id}:{room_id}"
+
+
+def legacy_unique_id_map(zones: dict) -> dict[str, str]:
+    """Map pre-2.2 unique ids to current ones.
+
+    Where two old ids collided, the first in config order wins; that is the
+    entity that was actually created (entities were added in config order).
+    """
+    mapping = {"heating_manager_global": GLOBAL_UNIQUE_ID}
+    for zone_id, zone in zones.items():
+        if not isinstance(zone, dict):
+            continue
+        rooms = zone.get(CONF_ROOMS)
+        for room_id in (rooms if isinstance(rooms, dict) else {}):
+            mapping.setdefault(f"heating_manager_{zone_id}_{room_id}", room_unique_id(zone_id, room_id))
+        mapping.setdefault(f"heating_manager_{zone_id}_zone", zone_unique_id(zone_id))
+    return mapping
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +398,8 @@ def yaml_to_options(heating_config: dict, conf: dict | None = None) -> dict[str,
                 zone_options[CONF_ROOMS][str(room_id)] = room_options
         zones[zone_id] = zone_options
 
+    for problem in dedupe_trvs(zones):
+        _LOGGER.warning("Importing: TRV listed in more than one room: %s", problem)
     return {OPT_SETTINGS: settings, OPT_ZONES: zones}
 
 
@@ -323,8 +417,11 @@ def options_to_runtime(options: dict) -> tuple[dict, dict]:
     for key, value in (options.get(OPT_SETTINGS) or {}).items():
         if key in SETTINGS_BY_KEY:
             settings[key] = coerce_setting(SETTINGS_BY_KEY[key], value)
+    zones = copy.deepcopy(dict(options.get(OPT_ZONES) or {}))
+    for problem in dedupe_trvs(zones):
+        _LOGGER.warning("TRV assigned to more than one room: %s", problem)
     config = {
-        CONF_ZONES: options.get(OPT_ZONES) or {},
+        CONF_ZONES: zones,
         CONF_HEATING_DEMAND_MODE: settings[CONF_HEATING_DEMAND_MODE],
     }
     return config, settings
