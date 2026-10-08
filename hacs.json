@@ -2,6 +2,8 @@
   "name": "Heating Manager",
   "content_in_root": false,
   "render_readme": true,
-  "domains": ["climate", "sensor", "switch"],
-  "homeassistant": "2023.1.0"
+  "domains": [
+    "climate"
+  ],
+  "homeassistant": "2024.11.0"
 }

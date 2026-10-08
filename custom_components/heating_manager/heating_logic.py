@@ -125,6 +125,9 @@ class HeatingLogic:
             True if zone needs heating, False otherwise
         """
         _zone_id_key = zone_id
+        # Rooms switched off by the user take no part in zone demand
+        rooms = {room_id: data for room_id, data in rooms.items() if not data.get("off")}
+
         # BOOST ALWAYS OVERRIDES: If any room has active boost, demand heating
         for room_data in rooms.values():
             if room_data.get("boost"):

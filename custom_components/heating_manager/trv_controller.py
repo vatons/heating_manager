@@ -76,6 +76,7 @@ class TRVController:
         target_temp: float,
         trv_internal_temp: float | None,
         needs_heating: bool,
+        learn_offset: bool = True,
     ) -> float:
         """Calculate optimal TRV setpoint using dynamic sensor offset.
 
@@ -87,19 +88,35 @@ class TRVController:
             target_temp: Desired room temperature (°C)
             trv_internal_temp: TRV's internal sensor temperature (°C)
             needs_heating: Whether room currently needs heating
+            learn_offset: Update the learned offset from this reading. False when
+                room_temp is a fallback (zone average, TRV, stale value) rather
+                than the room's own sensors.
 
         Returns:
             Optimal TRV setpoint temperature (°C)
         """
-        # Disabled or missing data - use exact target
-        if not self.enabled or room_temp is None or trv_internal_temp is None:
+        # Disabled or no TRV reading - use exact target
+        if not self.enabled or trv_internal_temp is None:
             return target_temp
+
+        # No room reading: nothing to learn from, but keep compensating for the
+        # TRV's known sensor bias. A plain target would shut a TRV whose internal
+        # sensor reads warm, leaving a cold room unheated.
+        if room_temp is None:
+            ema_offset = self._get_ema_offset(zone_id, room_id, trv_id)
+            setpoint = target_temp + ema_offset
+            _LOGGER.debug(
+                "Room temperature unknown, using target=%.1f°C + learned offset=%.1f°C = %.1f°C",
+                target_temp, ema_offset, setpoint
+            )
+            return max(TRV_MIN_SETPOINT, min(setpoint, self.max_absolute_setpoint))
 
         # Calculate current sensor offset
         current_offset = trv_internal_temp - room_temp
 
         # Update offset EMA for learning
-        self._update_offset_ema(zone_id, room_id, trv_id, current_offset)
+        if learn_offset:
+            self._update_offset_ema(zone_id, room_id, trv_id, current_offset)
 
         # Get learned EMA offset for this TRV
         ema_offset = self._get_ema_offset(zone_id, room_id, trv_id)
@@ -287,6 +304,7 @@ class TRVController:
         target_temp: float,
         room_temp: float | None,
         needs_heating: bool,
+        learn_offset: bool = True,
     ) -> None:
         """Set TRV temperature with intelligent setpoint calculation.
 
@@ -315,8 +333,14 @@ class TRVController:
         # Calculate optimal setpoint
         trv_setpoint = self.calculate_trv_setpoint(
             zone_id, room_id, trv_id,
-            room_temp, target_temp, trv_internal_temp, needs_heating
+            room_temp, target_temp, trv_internal_temp, needs_heating,
+            learn_offset=learn_offset,
         )
+
+        # Fit the setpoint to what this TRV accepts. Home Assistant rejects a
+        # set_temperature outside the entity's min/max range, which would leave
+        # the TRV at its previous setpoint (e.g. shut while the room is cold).
+        trv_setpoint = self._apply_trv_limits(trv_id, trv_state, trv_setpoint)
 
         # Send command to TRV
         try:
@@ -326,6 +350,20 @@ class TRVController:
                     "Climate service not yet available, skipping TRV %s update", trv_id
                 )
                 return
+
+            # A TRV that is off ignores setpoints, so switch it back to heat.
+            if (
+                trv_state is not None
+                and trv_state.state == "off"
+                and "heat" in (trv_state.attributes.get("hvac_modes") or [])
+            ):
+                _LOGGER.warning("TRV %s is off, switching it to heat", trv_id)
+                await self.hass.services.async_call(
+                    "climate",
+                    "set_hvac_mode",
+                    {"entity_id": trv_id, "hvac_mode": "heat"},
+                    blocking=True,
+                )
 
             await self.hass.services.async_call(
                 "climate",
@@ -343,5 +381,59 @@ class TRVController:
                 trv_setpoint - target_temp
             )
         except Exception as err:
-            # Don't let TRV errors break the entire coordinator update
-            _LOGGER.warning("Error setting TRV %s temperature: %s", trv_id, err)
+            # Don't let TRV errors break the entire coordinator update, but make
+            # them visible: an undelivered setpoint means the TRV is uncontrolled.
+            _LOGGER.error("Error setting TRV %s temperature: %s", trv_id, err)
+
+    async def set_trv_setpoint(self, trv_id: str, setpoint: float) -> bool:
+        """Send a fixed setpoint to a TRV, fitted to its limits.
+
+        Errors are logged rather than raised, so one unreachable TRV cannot
+        break the caller. Returns True if the command was delivered.
+        """
+        setpoint = self._apply_trv_limits(trv_id, self.hass.states.get(trv_id), setpoint)
+        try:
+            await self.hass.services.async_call(
+                "climate",
+                "set_temperature",
+                {"entity_id": trv_id, "temperature": setpoint},
+                blocking=True,
+            )
+        except Exception as err:
+            _LOGGER.error("Error setting TRV %s temperature: %s", trv_id, err)
+            return False
+        return True
+
+    @staticmethod
+    def _apply_trv_limits(trv_id: str, trv_state: Any, setpoint: float) -> float:
+        """Round a setpoint to the TRV's step and clamp it to its min/max range."""
+        if trv_state is None:
+            return setpoint
+
+        def _attr_float(name: str) -> float | None:
+            try:
+                value = trv_state.attributes.get(name)
+                return float(value) if value is not None else None
+            except (ValueError, TypeError):
+                return None
+
+        original = setpoint
+
+        step = _attr_float("target_temp_step")
+        if step is not None and step > 0:
+            setpoint = round(round(setpoint / step) * step, 2)
+
+        min_temp = _attr_float("min_temp")
+        max_temp = _attr_float("max_temp")
+        if max_temp is not None and setpoint > max_temp:
+            setpoint = max_temp
+        if min_temp is not None and setpoint < min_temp:
+            setpoint = min_temp
+
+        if setpoint != original:
+            _LOGGER.debug(
+                "TRV %s: setpoint %.2f°C adjusted to %.2f°C "
+                "(step=%s, min=%s, max=%s)",
+                trv_id, original, setpoint, step, min_temp, max_temp,
+            )
+        return setpoint

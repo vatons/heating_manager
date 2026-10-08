@@ -28,6 +28,7 @@ class TRVManager:
         target_temp: float | None,
         room_temp: float | None,
         needs_heating: bool,
+        learn_offset: bool = True,
     ) -> None:
         """Set the target temperature for all TRVs in a room using intelligent control."""
         if target_temp is None:
@@ -42,7 +43,8 @@ class TRVManager:
         for trv_id in trvs:
             await self.trv_controller.set_trv_temperature(
                 zone_id, room_id, trv_id,
-                target_temp, room_temp, needs_heating
+                target_temp, room_temp, needs_heating,
+                learn_offset=learn_offset,
             )
 
     async def get_trv_offset_info(

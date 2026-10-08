@@ -1,12 +1,15 @@
 {
   "domain": "heating_manager",
   "name": "Heating Manager",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "issue_tracker": "https://github.com/vatons/heating_manager/issues",
   "documentation": "https://github.com/vatons/heating_manager",
-  "codeowners": ["@vatons"],
-  "config_flow": false,
+  "codeowners": [
+    "@vatons"
+  ],
+  "config_flow": true,
   "dependencies": [],
   "requirements": [],
-  "iot_class": "local_polling"
+  "iot_class": "local_polling",
+  "single_config_entry": true
 }
