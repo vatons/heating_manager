@@ -74,7 +74,9 @@ Each zone appears as a device, with its room entities grouped under it.
 
 If you used an earlier version configured with `heating_manager:` in `configuration.yaml`, just upgrade and restart. Your `heating_manager.yaml` is imported into the UI automatically, keeping your zones, rooms, schedules and settings, as well as your entity IDs, history, boosts, overrides and learned TRV offsets.
 
-After the import, Home Assistant shows a repair notice: remove the `heating_manager:` entry from `configuration.yaml`, delete `heating_manager.yaml` and restart. From then on, make changes with **Configure**; edits to the YAML are ignored.
+If the automatic import didn't happen (for example, you removed the YAML before upgrading, or the integration was set up with no zones), use **Configure → Import from YAML file** instead. Enter the file's path relative to your config folder (e.g. `heating_manager.yaml`) and choose whether to also import settings. You'll see the zones, rooms and settings found before anything changes. Zones in the file are added, or replace a zone with the same ID; zones you created in the UI are kept. This works any time, not just when upgrading.
+
+After the automatic import, Home Assistant shows a repair notice: remove the `heating_manager:` entry from `configuration.yaml`, delete `heating_manager.yaml` and restart. From then on, make changes with **Configure**; edits to the YAML are ignored.
 
 ### Entities
 
