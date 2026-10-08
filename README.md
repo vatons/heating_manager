@@ -62,7 +62,11 @@ Everything is set up in the Home Assistant UI; no YAML is needed. Requires Home 
 3. On the integration's page:
    - **Add zone** adds another zone. A zone's form has its name, heating demand mode, **monitoring only**, and its weekday and weekend schedules. Add, edit, reorder or delete periods (start, end, temperature) in each list; turn on **Same as weekdays** to use one schedule all week. Periods on the same day can't overlap: the form names the two that clash.
    - **Add room** adds a room: pick its zone, TRVs and temperature sensors, and optionally a temperature offset. Under **Advanced**, pair sensors with separate "last seen" entities.
-   - Each zone and room is listed on the page. Click its **⚙** (gear) to change it, or use its **⋮** menu to delete it. Deleting a zone also deletes its rooms.
+   - Each zone and room is listed on the page, with each zone's rooms right under it and a short summary in every title:
+     - `Downstairs · 3 rooms` (plus `monitoring only` if set)
+     - `Downstairs › Lounge · 2 TRVs · 1 sensor`
+
+     Click a zone's or room's **⚙** (gear) to change it, or use its **⋮** menu to delete it. Deleting a zone also deletes its rooms. Each entry's arrow collapses it to just its title.
    - **Configure** has **Settings** (one form: temperatures, heating demand, boiler protection, sensors and boost, with TRV control, analytics and update interval in collapsed sections; the defaults suit most homes) and **Import from YAML file**.
 
 Changes apply as soon as you submit a form.

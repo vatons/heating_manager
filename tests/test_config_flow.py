@@ -171,7 +171,7 @@ async def test_user_flow_creates_entry_with_first_zone(hass, env):
     assert entry.version == 2
     assert entry.options == {"settings": default_settings()}
     zone = subentries(entry, "zone")["upstairs"]
-    assert zone.title == "Upstairs"
+    assert zone.title == "Upstairs · no rooms"
     assert zone.data["schedule"]["weekday"] == [{"start": "06:30", "end": "22:00", "temperature": 19.0}]
     assert zone.data["weekend_same_as_weekday"] is True
     assert hass.states.get("climate.upstairs") is not None
@@ -207,7 +207,7 @@ async def test_add_zone(hass, entry):
     assert result["type"] is FlowResultType.CREATE_ENTRY
 
     zone = subentries(entry, "zone")["upstairs"]
-    assert zone.title == "Upstairs"
+    assert zone.title == "Upstairs · no rooms"
     assert zone.data == {
         "zone_id": "upstairs",
         "name": "Upstairs",
@@ -305,11 +305,11 @@ async def test_reconfigure_zone(hass, entry):
     ))
     assert result["type"] is FlowResultType.ABORT and result["reason"] == "reconfigure_successful"
     zone = subentries(entry, "zone")["downstairs"]                      # id kept on rename
-    assert zone.title == "Ground floor"
+    assert zone.title == "Ground floor · 1 room · monitoring only"
     assert zone.data["monitoring_only"] is True
     assert zone.data["schedule"]["weekday"] == [{"start": "07:00", "end": "09:00", "temperature": 20.0}]
     # Rooms show their zone's new name
-    assert subentries(entry, "room")["lounge"].title == "Lounge (Ground floor)"
+    assert subentries(entry, "room")["lounge"].title == "Ground floor › Lounge · 1 TRV · 1 sensor"
     # Entity ids are unchanged
     assert hass.states.get("climate.downstairs").attributes["monitoring_only"] is True
 
@@ -397,7 +397,8 @@ async def test_add_room(hass, entry):
     assert result["type"] is FlowResultType.CREATE_ENTRY
 
     room = subentries(entry, "room")["study"]
-    assert room.title == "Study (Downstairs)"
+    assert room.title == "Downstairs › Study · 1 TRV · 1 sensor"
+    assert subentries(entry, "zone")["downstairs"].title == "Downstairs · 2 rooms"
     assert room.data == {
         "room_id": "study",
         "zone_id": "downstairs",
@@ -422,7 +423,7 @@ async def test_room_trv_used_by_another_room(hass, entry):
     result = await start_subentry(hass, entry, "room")
     result = await submit(hass, result, room_input(trvs=["climate.lounge_trv", "climate.study_trv"]))
     assert result["errors"] == {"trvs": "trv_in_use"}
-    assert result["description_placeholders"]["trv_conflict"] == "climate.lounge_trv (Lounge (Downstairs))"
+    assert result["description_placeholders"]["trv_conflict"] == "climate.lounge_trv (Downstairs › Lounge)"
     result = await submit(hass, result, room_input(trvs=["climate.study_trv"]))
     assert result["type"] is FlowResultType.CREATE_ENTRY
     # The room that already has the TRV can keep it
@@ -446,7 +447,7 @@ async def test_reconfigure_room(hass, entry):
     ))
     assert result["reason"] == "reconfigure_successful"
     room = subentries(entry, "room")["lounge"]                       # id unchanged on rename
-    assert room.title == "Living room (Downstairs)"
+    assert room.title == "Downstairs › Living room · 1 TRV · 2 sensors"
     assert room.data["sensors"] == [
         {"temperature": "sensor.lounge", "last_seen": "sensor.lounge_last_seen"},
         {"temperature": "sensor.study"},
@@ -460,7 +461,9 @@ async def test_move_room_to_another_zone_keeps_entity(hass, entry):
     lounge = subentries(entry, "room")["lounge"]
     result = await start_subentry(hass, entry, "room", lounge.subentry_id)
     await submit(hass, result, room_input(zone="upstairs", name="Lounge", trvs=["climate.lounge_trv"]))
-    assert subentries(entry, "room")["lounge"].title == "Lounge (Upstairs)"
+    assert subentries(entry, "room")["lounge"].title == "Upstairs › Lounge · 1 TRV"
+    zones = subentries(entry, "zone")
+    assert (zones["downstairs"].title, zones["upstairs"].title) == ("Downstairs · no rooms", "Upstairs · 1 room")
     assert entry_to_runtime(entry)[0]["zones"]["upstairs"]["rooms"].keys() == {"lounge"}
     entity_id = er.async_get(hass).async_get_entity_id("climate", DOMAIN, room_unique_id("lounge"))
     assert entity_id == "climate.downstairs_lounge"
@@ -491,6 +494,37 @@ async def test_room_named_zone_does_not_clash_with_zone_entity(hass, entry):
     assert "zone" in subentries(entry, "room")
     assert hass.states.get("climate.downstairs") is not None
     assert hass.states.get("climate.downstairs_zone") is not None
+
+
+async def test_titles_list_rooms_under_their_zone(hass, env):
+    """Titles from 3.0.0 ("Lounge (Downstairs)") are updated; sorted, rooms follow their zone."""
+    options = base_options()
+    options["zones"]["upstairs"] = {"name": "Upstairs", "monitoring_only": True, "schedule": {}, "rooms": {
+        "bathroom": {"name": "Bathroom", "trvs": [], "sensors": [{"temperature": "sensor.study"}]}}}
+    options["zones"]["downstairs"]["rooms"]["study"] = {
+        "name": "Study", "trvs": ["climate.study_trv"], "sensors": [{"temperature": "sensor.study"}]}
+    config_entry = entry_from_options(options)
+    for sub in list(config_entry.subentries.values()):
+        if sub.subentry_type == "room":
+            object.__setattr__(sub, "title", f"{sub.data['name']} (old)")
+    await setup_entry(hass, config_entry)
+    titles = sorted((s.title for s in config_entry.subentries.values()), key=str.casefold)
+    assert titles == [
+        "Downstairs · 2 rooms",
+        "Downstairs › Lounge · 1 TRV · 1 sensor",
+        "Downstairs › Study · 1 TRV · 1 sensor",
+        "Upstairs · 1 room · monitoring only",
+        "Upstairs › Bathroom · 1 sensor",
+    ]
+
+
+async def test_title_only_change_does_not_reload(hass, entry):
+    coordinator = entry.runtime_data
+    zone = subentries(entry, "zone")["downstairs"]
+    hass.config_entries.async_update_subentry(entry, zone, title="Something else")
+    await hass.async_block_till_done()
+    assert entry.runtime_data is coordinator                          # not reloaded
+    assert subentries(entry, "zone")["downstairs"].title == "Downstairs · 1 room"
 
 
 async def test_orphan_rooms_removed_on_setup(hass, env):
@@ -622,7 +656,7 @@ async def test_yaml_import_creates_entry_with_zones_and_rooms(hass, env, tmp_pat
     assert settings["boost_duration"] == 45                       # from configuration.yaml
 
     zone = subentries(entry, "zone")["downstairs"]
-    assert zone.title == "Downstairs"
+    assert zone.title == "Downstairs · 2 rooms"
     assert zone.data["heating_demand_mode"] == "any_room"
     assert zone.data["schedule"]["weekday"] == [                  # sorted, normalised, invalid dropped
         {"start": "06:30", "end": "08:00", "temperature": 19.5},
@@ -632,7 +666,7 @@ async def test_yaml_import_creates_entry_with_zones_and_rooms(hass, env, tmp_pat
     assert zone.data["weekend_same_as_weekday"] is False
 
     rooms = subentries(entry, "room")
-    assert rooms["lounge"].title == "Lounge (Downstairs)"
+    assert rooms["lounge"].title == "Downstairs › Lounge · 1 TRV · 1 sensor"
     assert rooms["lounge"].data["temperature_offset"] == -1.0
     assert rooms["lounge"].data["sensors"] == [
         {"temperature": "sensor.lounge", "last_seen": "sensor.lounge_last_seen"}
@@ -753,7 +787,7 @@ async def test_migrate_v1_entry_to_subentries(hass, env):
     assert zones["upstairs"].data["weekend_same_as_weekday"] is False
     rooms = subentries(entry, "room")
     assert set(rooms) == {"lounge", "upstairs_lounge"}                # room ids are unique now
-    assert rooms["upstairs_lounge"].title == "Lounge (Upstairs)"
+    assert rooms["upstairs_lounge"].title == "Upstairs › Lounge · 1 TRV"
     assert entry.runtime_data.minimum_temp == 14
 
     for entity_id, unique_id, subentry in [

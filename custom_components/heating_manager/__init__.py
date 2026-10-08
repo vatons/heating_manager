@@ -57,6 +57,7 @@ from .entry_data import (
     SUBENTRY_ZONE,
     entry_to_runtime,
     legacy_unique_id_map,
+    subentry_titles,
     yaml_to_options,
     zones_to_subentries,
 )
@@ -205,9 +206,24 @@ def _async_remove_orphan_rooms(hass: HomeAssistant, entry: HeatingManagerConfigE
             hass.config_entries.async_remove_subentry(entry, sub.subentry_id)
 
 
+@callback
+def _async_update_titles(hass: HomeAssistant, entry: HeatingManagerConfigEntry) -> None:
+    """Keep zone and room titles (with their summaries) in step with the config."""
+    for subentry_id, title in subentry_titles(entry).items():
+        subentry = entry.subentries[subentry_id]
+        if subentry.title != title:
+            hass.config_entries.async_update_subentry(entry, subentry, title=title)
+
+
+def _runtime_signature(entry: HeatingManagerConfigEntry) -> str:
+    """What the running setup depends on; a change that leaves this alone needs no reload."""
+    return repr(entry_to_runtime(entry))
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: HeatingManagerConfigEntry) -> bool:
     """Set up Heating Manager from a config entry."""
     _async_remove_orphan_rooms(hass, entry)
+    _async_update_titles(hass, entry)
     config, settings = entry_to_runtime(entry)
     _async_migrate_unique_ids(hass, config)
 
@@ -235,6 +251,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HeatingManagerConfigEntr
     )
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
+    coordinator.entry_signature = _runtime_signature(entry)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
@@ -262,7 +279,11 @@ def _async_migrate_unique_ids(hass: HomeAssistant, config: dict) -> None:
 
 
 async def _async_reload_entry(hass: HomeAssistant, entry: HeatingManagerConfigEntry) -> None:
-    """Apply changes made in the Configure menu."""
+    """Apply changes to settings, zones and rooms (title-only updates need no reload)."""
+    coordinator = getattr(entry, "runtime_data", None)
+    if coordinator is not None and getattr(coordinator, "entry_signature", None) == _runtime_signature(entry):
+        _async_update_titles(hass, entry)
+        return
     await hass.config_entries.async_reload(entry.entry_id)
 
 

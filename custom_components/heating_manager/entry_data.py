@@ -334,8 +334,52 @@ CONF_ROOM_ID = "room_id"
 CONF_WEEKEND_SAME = "weekend_same_as_weekday"
 
 
-def room_title(room_name: str, zone_name: str) -> str:
-    return f"{room_name} ({zone_name})"
+# Titles on the integration page. HA lists subentries sorted by title, so
+# "Zone › Room" puts each zone's rooms right under it; each title ends with
+# a short summary.
+
+def _count(number: int, singular: str, plural: str) -> str:
+    return f"{number} {singular if number == 1 else plural}"
+
+
+def room_label_for(room_name: str, zone_name: str) -> str:
+    """"Downstairs › Lounge": names a room in titles and messages."""
+    return f"{zone_name} › {room_name}"
+
+
+def room_title(room: dict, zone_name: str) -> str:
+    """"Downstairs › Lounge · 1 TRV · 2 sensors"."""
+    parts = [room_label_for(room.get("name", ""), zone_name)]
+    if trvs := len(room.get(CONF_TRVS) or []):
+        parts.append(_count(trvs, "TRV", "TRVs"))
+    if sensors := len(room.get(CONF_SENSORS) or []):
+        parts.append(_count(sensors, "sensor", "sensors"))
+    return " · ".join(parts)
+
+
+def zone_title(zone: dict, room_count: int) -> str:
+    """"Downstairs · 3 rooms" (plus "monitoring only")."""
+    parts = [zone.get("name", ""), _count(room_count, "room", "rooms") if room_count else "no rooms"]
+    if zone.get(CONF_MONITORING_ONLY):
+        parts.append("monitoring only")
+    return " · ".join(parts)
+
+
+def subentry_titles(entry: Any) -> dict[str, str]:
+    """The title each zone and room subentry should have, by subentry id."""
+    zones = {
+        sub.data.get(CONF_ZONE_ID): sub for sub in entry.subentries.values() if sub.subentry_type == SUBENTRY_ZONE
+    }
+    rooms = [sub for sub in entry.subentries.values() if sub.subentry_type == SUBENTRY_ROOM]
+    titles = {}
+    for zone_id, zone in zones.items():
+        count = sum(1 for room in rooms if room.data.get(CONF_ZONE_ID) == zone_id)
+        titles[zone.subentry_id] = zone_title(zone.data, count)
+    for room in rooms:
+        zone = zones.get(room.data.get(CONF_ZONE_ID))
+        if zone is not None:
+            titles[room.subentry_id] = room_title(room.data, zone.data.get("name", ""))
+    return titles
 
 
 def zone_subentry(zone_id: str, zone: dict) -> dict[str, Any]:
@@ -353,7 +397,13 @@ def zone_subentry(zone_id: str, zone: dict) -> dict[str, Any]:
         data[CONF_HEATING_DEMAND_MODE] = zone[CONF_HEATING_DEMAND_MODE]
     if zone.get(CONF_MONITORING_ONLY):
         data[CONF_MONITORING_ONLY] = True
-    return {"subentry_type": SUBENTRY_ZONE, "title": data["name"], "unique_id": zone_id, "data": data}
+    rooms = zone.get(CONF_ROOMS) or {}
+    return {
+        "subentry_type": SUBENTRY_ZONE,
+        "title": zone_title(data, len(rooms) if isinstance(rooms, dict) else 0),
+        "unique_id": zone_id,
+        "data": data,
+    }
 
 
 def room_subentry(room_id: str, room: dict, zone_id: str, zone_name: str, **extra) -> dict[str, Any]:
@@ -370,7 +420,7 @@ def room_subentry(room_id: str, room: dict, zone_id: str, zone_name: str, **extr
         data[CONF_TEMPERATURE_OFFSET] = float(room[CONF_TEMPERATURE_OFFSET])
     return {
         "subentry_type": SUBENTRY_ROOM,
-        "title": room_title(data["name"], zone_name),
+        "title": room_title(data, zone_name),
         "unique_id": room_id,
         "data": data,
     }

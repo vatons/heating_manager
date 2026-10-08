@@ -59,10 +59,12 @@ from .entry_data import (
     default_settings,
     entry_to_runtime,
     first_overlap,
+    room_label_for,
     room_title,
     schedule_overlaps,
     sort_periods,
     unique_id_for,
+    zone_title,
     yaml_to_options,
     zone_subentry,
     zones_to_subentries,
@@ -296,7 +298,7 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
         if not name:
             errors[CONF_NAME] = "name_required"
         elif any(
-            sub.title.casefold() == name.casefold() and sub.data.get(CONF_ZONE_ID) != zone_id
+            sub.data.get(CONF_NAME, "").casefold() == name.casefold() and sub.data.get(CONF_ZONE_ID) != zone_id
             for sub in _subentries(self._get_entry(), SUBENTRY_ZONE)
         ):
             errors[CONF_NAME] = "name_in_use"
@@ -338,7 +340,7 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
             zone_id = unique_id_for(user_input.get(CONF_NAME, "").strip(), taken, "zone")
             data, errors, placeholders = self._validate(user_input, zone_id)
             if data is not None:
-                return self.async_create_entry(title=data[CONF_NAME], data=data, unique_id=zone_id)
+                return self.async_create_entry(title=zone_title(data, 0), data=data, unique_id=zone_id)
             defaults = self._form_defaults(user_input)
         return self.async_show_form(
             step_id="user", data_schema=self._schema(defaults), errors=errors,
@@ -357,14 +359,9 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
         if user_input is not None:
             data, errors, placeholders = self._validate(user_input, zone_id)
             if data is not None:
-                if data[CONF_NAME] != subentry.title:
-                    # Room titles include their zone's name
-                    for room in _subentries(entry, SUBENTRY_ROOM):
-                        if room.data.get(CONF_ZONE_ID) == zone_id:
-                            self.hass.config_entries.async_update_subentry(
-                                entry, room, title=room_title(room.data[CONF_NAME], data[CONF_NAME])
-                            )
-                return self.async_update_and_abort(entry, subentry, title=data[CONF_NAME], data=data)
+                # Its rooms' titles ("Zone › Room") are refreshed on reload
+                rooms = sum(1 for room in _subentries(entry, SUBENTRY_ROOM) if room.data.get(CONF_ZONE_ID) == zone_id)
+                return self.async_update_and_abort(entry, subentry, title=zone_title(data, rooms), data=data)
             defaults = self._form_defaults(user_input)
         return self.async_show_form(
             step_id="reconfigure", data_schema=self._schema(defaults), errors=errors,
@@ -402,7 +399,7 @@ class RoomSubentryFlow(ConfigSubentryFlow):
 
     def _schema(self, data: dict) -> vol.Schema:
         zones = [
-            {"value": sub.data[CONF_ZONE_ID], "label": sub.title}
+            {"value": sub.data[CONF_ZONE_ID], "label": sub.data.get(CONF_NAME, sub.title)}
             for sub in _subentries(self._get_entry(), SUBENTRY_ZONE)
         ]
         sensors = data.get(CONF_SENSORS) or []
@@ -457,7 +454,9 @@ class RoomSubentryFlow(ConfigSubentryFlow):
                 continue
             for trv in trvs:
                 if trv in room.data.get(CONF_TRVS, []):
-                    conflicts.append(f"{trv} ({room.title})")
+                    conflicts.append(
+                        f"{trv} ({room_label_for(room.data.get(CONF_NAME, ''), self._zone_name(room.data.get(CONF_ZONE_ID)))})"
+                    )
         if conflicts:
             errors[CONF_TRVS] = "trv_in_use"
             placeholders["trv_conflict"] = ", ".join(conflicts)
@@ -486,7 +485,7 @@ class RoomSubentryFlow(ConfigSubentryFlow):
     def _zone_name(self, zone_id: str) -> str:
         for sub in _subentries(self._get_entry(), SUBENTRY_ZONE):
             if sub.data[CONF_ZONE_ID] == zone_id:
-                return sub.title
+                return sub.data.get(CONF_NAME, sub.title)
         return zone_id
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
@@ -502,7 +501,7 @@ class RoomSubentryFlow(ConfigSubentryFlow):
             data, errors, placeholders = self._validate(user_input, room_id)
             if data is not None:
                 return self.async_create_entry(
-                    title=room_title(data[CONF_NAME], self._zone_name(data[CONF_ZONE_ID])),
+                    title=room_title(data, self._zone_name(data[CONF_ZONE_ID])),
                     data=data,
                     unique_id=room_id,
                 )
@@ -530,7 +529,7 @@ class RoomSubentryFlow(ConfigSubentryFlow):
                         data[key] = subentry.data[key]
                 return self.async_update_and_abort(
                     entry, subentry,
-                    title=room_title(data[CONF_NAME], self._zone_name(data[CONF_ZONE_ID])),
+                    title=room_title(data, self._zone_name(data[CONF_ZONE_ID])),
                     data=data,
                 )
             defaults = self._form_defaults(user_input)

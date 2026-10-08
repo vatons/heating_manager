@@ -138,7 +138,7 @@ async def test_room_form_rejects_trv_used_by_another_room(hass, add_trvs, setup_
     result = await start_subentry(hass, entry, "room")
     result = await submit(hass, result, room_input(zone="home", name="Study", trvs=["climate.lounge_trv", "climate.spare_trv"]))
     assert result["errors"] == {"trvs": "trv_in_use"}
-    assert result["description_placeholders"]["trv_conflict"] == "climate.lounge_trv (Lounge (Home))"
+    assert result["description_placeholders"]["trv_conflict"] == "climate.lounge_trv (Home › Lounge)"
     result = await submit(hass, result, room_input(zone="home", name="Study", trvs=["climate.spare_trv"]))
     assert result["type"] is FlowResultType.CREATE_ENTRY
 
