@@ -549,7 +549,7 @@ def yaml_to_options(heating_config: dict, conf: dict | None = None) -> dict[str,
         _LOGGER.warning("Importing: TRV listed in more than one room: %s", problem)
     for zone in zones.values():
         for problem in schedule_overlaps(zone["name"], zone[CONF_SCHEDULE]):
-            _LOGGER.warning("Importing: schedule periods overlap (%s); fix them in the zone's settings", problem)
+            _LOGGER.warning("Importing: schedule periods overlap (%s); fix them in the zone's form", problem)
     return {OPT_SETTINGS: settings, OPT_ZONES: zones}
 
 
