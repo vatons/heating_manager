@@ -1,6 +1,8 @@
 """Tests for UI setup: config flow, options flow, YAML import and migration."""
 from __future__ import annotations
 
+import os
+
 import pytest
 import yaml
 
@@ -572,6 +574,19 @@ async def test_every_ui_string_is_translated(hass, entry):
     await check(await form(hass, flow_id, {"day": "weekday"}))
     await check(await form(hass, flow_id, {"period": "0"}))
     hass.config_entries.options.async_abort(flow_id)
+    flow_id = await open_options(hass, entry)
+    path = hass.config.path("hm_translation_check.yaml")
+    with open(path, "w") as fh:
+        fh.write(LEGACY_YAML)
+    try:
+        await check(await menu(hass, flow_id, "import_yaml"))
+        await check(await form(hass, flow_id, {"path": "hm_translation_check.yaml"}))
+    finally:
+        os.remove(path)
+    hass.config_entries.options.async_abort(flow_id)
+    errors = strings["options"]["error"]
+    for key in ("file_not_found", "invalid_yaml", "not_yaml_file", "path_outside_config", "no_zones"):
+        assert key in errors
     assert seen | {"init", "save"} >= set(steps) - {"save"}
 
     config_steps = strings["config"]["step"]
@@ -634,3 +649,119 @@ async def test_import_monitoring_only_from_yaml(hass, env, tmp_path):
     await setup_yaml(hass, tmp_path, text=text)
     options = hass.config_entries.async_entries(DOMAIN)[0].options
     assert options["zones"]["downstairs"]["monitoring_only"] is True
+
+
+# ---------------------------------------------------------------------------
+# Import from YAML file (Configure menu)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def config_file(hass):
+    """Write files into HA's config dir; removed afterwards."""
+    created = []
+
+    def _write(name, text):
+        path = hass.config.path(name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(text)
+        created.append(path)
+        return path
+
+    yield _write
+    for path in created:
+        os.remove(path)
+
+
+async def start_import(hass, entry, path, import_settings=True):
+    flow_id = await open_options(hass, entry)
+    result = await menu(hass, flow_id, "import_yaml")
+    assert result["step_id"] == "import_yaml"
+    result = await form(hass, flow_id, {"path": path, "import_settings": import_settings})
+    return flow_id, result
+
+
+async def test_import_yaml_into_empty_entry(hass, env, config_file):
+    """The reported case: an entry with no zones and default settings."""
+    empty = MockConfigEntry(domain=DOMAIN, title="Heating Manager", data={}, options=new_options())
+    empty.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(empty.entry_id)
+    await hass.async_block_till_done()
+    assert empty.options["zones"] == {}
+
+    config_file("hm_import_test.yaml", LEGACY_YAML)
+    flow_id, result = await start_import(hass, empty, "hm_import_test.yaml")
+    assert result["step_id"] == "import_yaml_confirm"
+    zones_text = result["description_placeholders"]["zones"]
+    assert "Downstairs: 2 room(s), 3 schedule period(s)" in zones_text
+    assert "replaces" not in zones_text
+    assert result["description_placeholders"]["settings"] == "2"     # minimum_temp, heating_demand_mode
+
+    result = await form(hass, flow_id, {"confirm": True})
+    assert result["step_id"] == "init"
+    await save(hass, flow_id)
+
+    options = empty.options
+    assert set(options["zones"]) == {"downstairs"}
+    assert set(options["zones"]["downstairs"]["rooms"]) == {"lounge", "study"}
+    assert options["settings"]["minimum_temp"] == 12
+    assert options["settings"]["heating_demand_mode"] == "zone_average"
+    assert options["settings"]["boost_duration"] == default_settings()["boost_duration"]
+    assert hass.states.get("climate.downstairs_lounge") is not None
+
+
+async def test_import_yaml_merges_with_existing_zones(hass, entry, config_file):
+    options = base_options(minimum_temp=14)
+    options["zones"]["upstairs"] = {"name": "Upstairs", "schedule": {}, "rooms": {}}
+    hass.config_entries.async_update_entry(entry, options=options)
+    await hass.async_block_till_done()
+
+    config_file("hm_import_test.yaml", LEGACY_YAML)
+    flow_id, result = await start_import(hass, entry, "hm_import_test.yaml", import_settings=False)
+    assert "(replaces the existing zone)" in result["description_placeholders"]["zones"]
+    assert result["description_placeholders"]["settings"] == "0"
+    await form(hass, flow_id, {"confirm": True})
+    await save(hass, flow_id)
+
+    zones = entry.options["zones"]
+    assert set(zones) == {"downstairs", "upstairs"}                  # UI-only zone kept
+    assert set(zones["downstairs"]["rooms"]) == {"lounge", "study"}  # replaced from file
+    assert entry.options["settings"]["minimum_temp"] == 14           # settings untouched
+
+
+async def test_import_yaml_declined_changes_nothing(hass, entry, config_file):
+    config_file("hm_import_test.yaml", LEGACY_YAML.replace("downstairs:", "garage:", 1))
+    flow_id, result = await start_import(hass, entry, "hm_import_test.yaml")
+    result = await form(hass, flow_id, {"confirm": False})
+    assert result["step_id"] == "init"
+    await save(hass, flow_id)
+    assert set(entry.options["zones"]) == {"downstairs"}
+
+
+async def test_import_yaml_in_subfolder_with_absolute_path(hass, entry, config_file):
+    path = config_file("packages/hm_import_test.yml", LEGACY_YAML)
+    flow_id, result = await start_import(hass, entry, path)
+    assert result["step_id"] == "import_yaml_confirm"
+
+
+@pytest.mark.parametrize(
+    ("path", "text", "error"),
+    [
+        ("hm_missing.yaml", None, "file_not_found"),
+        ("hm_bad.yaml", "zones: [unclosed", "invalid_yaml"),
+        ("hm_list.yaml", "- a\n- b\n", "invalid_yaml"),
+        ("hm_bad.txt", "zones: {}", "not_yaml_file"),
+        ("../outside.yaml", None, "path_outside_config"),
+        ("/etc/hostname.yaml", None, "path_outside_config"),
+        ("hm_nozones.yaml", "minimum_temp: 10\nrooms: {}\n", "no_zones"),
+    ],
+)
+async def test_import_yaml_errors(hass, entry, config_file, path, text, error):
+    if text is not None:
+        config_file(path, text)
+    flow_id, result = await start_import(hass, entry, path)
+    assert result["step_id"] == "import_yaml"
+    assert result["errors"] == {"base": error}
+    if error == "no_zones":
+        assert result["description_placeholders"]["keys"] == "minimum_temp, rooms"
+    hass.config_entries.options.async_abort(flow_id)

@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import copy
+import os
 from typing import Any
 
 import voluptuous as vol
+import yaml
 
 from homeassistant.config_entries import (
     ConfigEntry,
@@ -35,6 +37,7 @@ from .entry_data import (
     OPT_SETTINGS,
     OPT_ZONES,
     SETTINGS,
+    SETTINGS_BY_KEY,
     SettingSpec,
     coerce_setting,
     format_period,
@@ -43,6 +46,7 @@ from .entry_data import (
     period_minutes,
     sort_periods,
     unique_id_for,
+    yaml_to_options,
 )
 from .schedule_manager import format_time, parse_time
 
@@ -62,6 +66,9 @@ CONF_PERIOD = "period"
 CONF_DELETE = "delete"
 CONF_CONFIRM = "confirm"
 CONF_LAST_SEEN = "configure_last_seen"
+CONF_PATH = "path"
+CONF_IMPORT_SETTINGS = "import_settings"
+DEFAULT_IMPORT_PATH = "heating_manager.yaml"
 
 
 def _setting_selector(spec: SettingSpec) -> selector.Selector:
@@ -143,6 +150,7 @@ class HeatingManagerOptionsFlow(OptionsFlow):
         self._room_id: str | None = None
         self._day: str | None = None
         self._period_index: int | None = None
+        self._pending_import: dict[str, Any] | None = None
 
     @property
     def options(self) -> dict[str, Any]:
@@ -164,11 +172,106 @@ class HeatingManagerOptionsFlow(OptionsFlow):
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return self.async_show_menu(
-            step_id="init", menu_options=["zones", "settings", "advanced", "save"]
+            step_id="init", menu_options=["zones", "settings", "advanced", "import_yaml", "save"]
         )
 
     async def async_step_save(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return self.async_create_entry(data=self.options)
+
+    # -- import from YAML ----------------------------------------------------
+
+    def _load_yaml(self, path: str) -> tuple[dict | None, str | None, str]:
+        """Read a heating_manager.yaml style file. Returns (content, error, full path)."""
+        config_dir = os.path.realpath(self.hass.config.config_dir)
+        full_path = os.path.realpath(
+            path if os.path.isabs(path) else os.path.join(config_dir, path)
+        )
+        if os.path.commonpath([config_dir, full_path]) != config_dir:
+            return None, "path_outside_config", full_path
+        if not full_path.lower().endswith((".yaml", ".yml")):
+            return None, "not_yaml_file", full_path
+        try:
+            with open(full_path, encoding="utf-8") as file:
+                content = yaml.safe_load(file)
+        except FileNotFoundError:
+            return None, "file_not_found", full_path
+        except (OSError, yaml.YAMLError):
+            return None, "invalid_yaml", full_path
+        if not isinstance(content, dict):
+            return None, "invalid_yaml", full_path
+        return content, None, full_path
+
+    async def async_step_import_yaml(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Read zones (and optionally settings) from a YAML file."""
+        errors: dict[str, str] = {}
+        placeholders = {"keys": "", "path": ""}
+        defaults = {CONF_PATH: DEFAULT_IMPORT_PATH, CONF_IMPORT_SETTINGS: True}
+        if user_input is not None:
+            defaults = user_input
+            content, error, full_path = await self.hass.async_add_executor_job(
+                self._load_yaml, user_input[CONF_PATH].strip()
+            )
+            placeholders["path"] = full_path
+            if error:
+                errors["base"] = error
+            else:
+                imported = yaml_to_options(content)
+                if not imported[OPT_ZONES]:
+                    errors["base"] = "no_zones"
+                    placeholders["keys"] = ", ".join(map(str, content)) or "(none)"
+                else:
+                    settings = {
+                        key: value
+                        for key, value in imported[OPT_SETTINGS].items()
+                        if key in content and key in SETTINGS_BY_KEY
+                    } if user_input.get(CONF_IMPORT_SETTINGS) else {}
+                    self._pending_import = {
+                        OPT_ZONES: imported[OPT_ZONES],
+                        OPT_SETTINGS: settings,
+                        CONF_PATH: full_path,
+                    }
+                    return await self.async_step_import_yaml_confirm()
+        return self.async_show_form(
+            step_id="import_yaml",
+            data_schema=vol.Schema({
+                vol.Required(CONF_PATH, default=defaults[CONF_PATH]): str,
+                vol.Optional(CONF_IMPORT_SETTINGS, default=defaults.get(CONF_IMPORT_SETTINGS, True)): bool,
+            }),
+            errors=errors,
+            description_placeholders=placeholders,
+        )
+
+    async def async_step_import_yaml_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        pending = self._pending_import
+        if user_input is not None:
+            if user_input.get(CONF_CONFIRM):
+                self._zones.update(pending[OPT_ZONES])
+                self.options[OPT_SETTINGS].update(pending[OPT_SETTINGS])
+            self._pending_import = None
+            return await self.async_step_init()
+
+        zone_lines = []
+        for zone_id, zone in pending[OPT_ZONES].items():
+            rooms = len(zone.get(CONF_ROOMS, {}))
+            periods = sum(len(p) for p in zone.get(CONF_SCHEDULE, {}).values())
+            replaces = " (replaces the existing zone)" if zone_id in self._zones else ""
+            zone_lines.append(
+                f"- {zone.get(CONF_NAME, zone_id)}: {rooms} room(s), "
+                f"{periods} schedule period(s){replaces}"
+            )
+        return self.async_show_form(
+            step_id="import_yaml_confirm",
+            data_schema=vol.Schema({vol.Required(CONF_CONFIRM, default=True): bool}),
+            description_placeholders={
+                "path": pending[CONF_PATH],
+                "zones": "\n".join(zone_lines),
+                "settings": str(len(pending[OPT_SETTINGS])),
+            },
+        )
 
     # -- settings ----------------------------------------------------------
 
