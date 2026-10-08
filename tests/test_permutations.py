@@ -18,13 +18,13 @@ from custom_components.heating_manager.entry_data import (
     dedupe_trvs,
     entry_to_runtime,
     new_options,
-    room_subentry,
+    stored_room,
     yaml_to_options,
     zone_subentry,
 )
 
 from .conftest import FakeTRV, entry_from_options, local_dt, set_temp
-from .test_config_flow import form, menu, open_options, room_input, start_subentry, submit
+from .test_config_flow import edit_zone, form, menu, open_options
 
 
 def options_with_rooms(rooms: dict, schedule_temp: float = 19.0) -> dict:
@@ -84,19 +84,22 @@ async def test_shared_trv_controlled_by_first_room_only(hass, add_trvs, setup_en
     assert all(sp > 17.0 for sp in trv.set_temperature_calls)
     assert room_data(entry, "b")["trvs"] == []
     assert "climate.shared_trv is already in Home / A" in caplog.text
-    stored = [sub for sub in entry.subentries.values() if sub.data.get("room_id") == "b"][0]
-    assert stored.data["trvs"] == ["climate.shared_trv"]                 # stored config untouched
+    assert stored_rooms(entry)["b"]["trvs"] == ["climate.shared_trv"]     # stored config untouched
+
+
+def stored_rooms(entry) -> dict:
+    zone = next(iter(entry.subentries.values()))
+    return {r["room_id"]: r for r in zone.data["rooms"]}
 
 
 def shared_trv_entry() -> MockConfigEntry:
     zone = options_with_rooms({})["zones"]["home"]
     return MockConfigEntry(
-        domain=DOMAIN, title="Heating Manager", data={}, version=2, options={"settings": {}},
-        subentries_data=[
-            zone_subentry("home", zone),
-            room_subentry("a", room("A", ["climate.shared_trv"], ["sensor.a"]), "home", "Home"),
-            room_subentry("b", room("B", ["climate.shared_trv"], ["sensor.b"]), "home", "Home"),
-        ],
+        domain=DOMAIN, title="Heating Manager", data={}, version=3, options={"settings": {}},
+        subentries_data=[zone_subentry("home", zone, [
+            stored_room("a", room("A", ["climate.shared_trv"], ["sensor.a"])),
+            stored_room("b", room("B", ["climate.shared_trv"], ["sensor.b"])),
+        ])],
     )
 
 
@@ -121,26 +124,27 @@ def test_entry_to_runtime_does_not_modify_subentries():
     entry = shared_trv_entry()
     config, _ = entry_to_runtime(entry)
     assert config["zones"]["home"]["rooms"]["b"]["trvs"] == []
-    stored = [sub for sub in entry.subentries.values() if sub.data.get("room_id") == "b"][0]
-    assert stored.data["trvs"] == ["climate.shared_trv"]
+    assert stored_rooms(entry)["b"]["trvs"] == ["climate.shared_trv"]
 
 
 def test_converting_options_to_subentries_dedupes_trvs():
     entry = entry_from_options(options_with_rooms({"a": room("A", ["climate.x"]), "b": room("B", ["climate.x"])}))
-    rooms = {sub.data["room_id"]: sub for sub in entry.subentries.values() if sub.subentry_type == "room"}
-    assert rooms["a"].data["trvs"] == ["climate.x"]
-    assert rooms["b"].data["trvs"] == []
+    rooms = stored_rooms(entry)
+    assert rooms["a"]["trvs"] == ["climate.x"]
+    assert rooms["b"]["trvs"] == []
 
 
 async def test_room_form_rejects_trv_used_by_another_room(hass, add_trvs, setup_entry):
     await add_trvs(FakeTRV("lounge_trv"), FakeTRV("spare_trv"))
     entry = await setup_entry(options_with_rooms({"lounge": room("Lounge", ["climate.lounge_trv"])}))
-    result = await start_subentry(hass, entry, "room")
-    result = await submit(hass, result, room_input(zone="home", name="Study", trvs=["climate.lounge_trv", "climate.spare_trv"]))
-    assert result["errors"] == {"trvs": "trv_in_use"}
+    lounge = {"name": "Lounge", "trvs": ["climate.lounge_trv"], "sensors": []}
+    result = await edit_zone(hass, entry, "home", rooms=[
+        lounge, {"name": "Study", "trvs": ["climate.lounge_trv", "climate.spare_trv"], "sensors": []}])
+    assert result["errors"] == {"base": "trv_in_use"}
     assert result["description_placeholders"]["trv_conflict"] == "climate.lounge_trv (Home › Lounge)"
-    result = await submit(hass, result, room_input(zone="home", name="Study", trvs=["climate.spare_trv"]))
-    assert result["type"] is FlowResultType.CREATE_ENTRY
+    result = await edit_zone(hass, entry, "home", rooms=[
+        lounge, {"name": "Study", "trvs": ["climate.spare_trv"], "sensors": []}])
+    assert result["type"] is FlowResultType.ABORT
 
 
 async def test_import_confirm_warns_about_shared_trvs(hass, add_trvs, setup_entry):

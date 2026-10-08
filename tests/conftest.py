@@ -264,13 +264,13 @@ async def make_coordinator(hass: HomeAssistant):
 def entry_from_options(options: dict, **kwargs) -> MockConfigEntry:
     """A current-version config entry from the 2.x options layout ({"settings", "zones"}).
 
-    Zones and rooms become subentries, as they are after migration.
+    Each zone becomes a subentry holding its rooms, as after migration.
     """
     return MockConfigEntry(
         domain="heating_manager",
         title="Heating Manager",
         data={},
-        version=2,
+        version=3,
         options={"settings": dict(options.get("settings") or {})},
         subentries_data=zones_to_subentries(options.get("zones") or {}),
         **kwargs,

@@ -48,9 +48,9 @@ async def async_setup_entry(
     """Set up climate entities from a config entry."""
     coordinator: HeatingManagerCoordinator = entry.runtime_data
 
-    # Each zone and room entity belongs to its subentry, so HA lists it there
-    # and removes it when the subentry is deleted. The global entity belongs
-    # to the entry itself.
+    # Zone and room entities belong to their zone's subentry, so HA lists each
+    # zone with its rooms and removes them when the zone is deleted. The global
+    # entity belongs to the entry itself.
     global_entity = GlobalClimate(coordinator)
     by_subentry: list[tuple[str | None, ClimateEntity]] = []
     for zone_id, zone_data in coordinator.config.get("zones", {}).items():
@@ -59,7 +59,7 @@ async def async_setup_entry(
         by_subentry.append((zone_data.get("subentry_id"), ZoneClimate(coordinator, zone_id, zone_data)))
         for room_id, room_config in zone_data.get("rooms", {}).items():
             by_subentry.append(
-                (room_config.get("subentry_id"), RoomClimate(coordinator, zone_id, room_id, room_config))
+                (zone_data.get("subentry_id"), RoomClimate(coordinator, zone_id, room_id, room_config))
             )
 
     _async_remove_stale_entities(
@@ -133,7 +133,7 @@ def _room_device_id(room_id: str) -> str:
 
 
 def _room_device_info(coordinator: HeatingManagerCoordinator, zone_id: str, room_id: str) -> DeviceInfo:
-    """Each room is its own device (a device belongs to one subentry), linked to its zone."""
+    """Each room is its own device, linked to its zone's device by async_link_room_devices."""
     zone = coordinator.config.get("zones", {}).get(zone_id, {})
     room = zone.get("rooms", {}).get(room_id, {})
     return DeviceInfo(
@@ -141,8 +141,31 @@ def _room_device_info(coordinator: HeatingManagerCoordinator, zone_id: str, room
         name=f"{zone.get('name', zone_id)} {room.get('name', room_id)}",
         manufacturer="Heating Manager",
         model="Heating room",
-        via_device=(DOMAIN, _zone_device_id(zone_id)),
     )
+
+
+@callback
+def async_link_room_devices(hass: HomeAssistant, entry: ConfigEntry, zones: dict) -> None:
+    """Show each room's device as connected via its zone's device.
+
+    Done in the registry once both exist: DeviceInfo's via_device is
+    deprecated, and its replacement (via_device_id) isn't in older HA.
+    """
+    dev_reg = dr.async_get(hass)
+    by_identifier = {
+        ident: device
+        for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id)
+        for domain, ident in device.identifiers
+        if domain == DOMAIN
+    }
+    for zone_id, zone in zones.items():
+        zone_device = by_identifier.get(_zone_device_id(zone_id))
+        if zone_device is None:
+            continue
+        for room_id in zone.get("rooms", {}):
+            room_device = by_identifier.get(_room_device_id(room_id))
+            if room_device is not None and room_device.via_device_id != zone_device.id:
+                dev_reg.async_update_device(room_device.id, via_device_id=zone_device.id)
 
 
 def _global_device_info() -> DeviceInfo:
