@@ -23,7 +23,6 @@ def test_plausible_change(v):
     assert v.validate(22.0, 20.0, 120) is False     # 2.0 in 2 min
 
 
-@pytest.mark.xfail(reason="BUG (minor): zero elapsed time rejects even an unchanged reading")
 def test_zero_time_delta_with_same_value_is_plausible(v):
     """Re-reading an unchanged sensor in the same instant must not be rejected."""
     assert v.validate(20.0, 20.0, 0) is True
@@ -31,3 +30,7 @@ def test_zero_time_delta_with_same_value_is_plausible(v):
 
 def test_negative_time_delta_rejected(v):
     assert v.validate(20.0, 19.0, -10) is False
+
+
+def test_zero_time_delta_with_changed_value_rejected(v):
+    assert v.validate(21.0, 20.0, 0) is False

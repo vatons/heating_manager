@@ -38,7 +38,7 @@ async def test_single_string_sensor(hass, tm):
     assert temp == 19.5
     assert meta["source"] == "local_sensors"
     assert meta["sensors_status"][0]["status"] == "active"
-    assert meta["sensors_status"][0]["last_seen_source"] == "state_last_updated"
+    assert meta["sensors_status"][0]["last_seen_source"] == "state_last_reported"
 
 
 async def test_multiple_sensors_are_averaged(hass, tm):
@@ -112,13 +112,9 @@ async def test_unparseable_last_seen_falls_back_to_last_updated(hass, tm):
     hass.states.async_set("sensor.t_last_seen", "1700000000000")    # epoch ms format
     temp, meta = await read(tm, {"sensors": [{"temperature": "sensor.t", "last_seen": "sensor.t_last_seen"}]})
     assert temp == 19.0
-    assert meta["sensors_status"][0]["last_seen_source"] == "state_last_updated"
+    assert meta["sensors_status"][0]["last_seen_source"] == "state_last_reported"
 
 
-@pytest.mark.xfail(
-    reason="BUG: a naive last_seen timestamp (no UTC offset) raises TypeError and "
-    "the reading is discarded as 'invalid'"
-)
 async def test_naive_last_seen_is_accepted(hass, tm):
     set_temp(hass, "sensor.t", 19.0)
     hass.states.async_set("sensor.t_last_seen", (NOW - timedelta(minutes=1)).replace(tzinfo=None).isoformat())
@@ -172,10 +168,6 @@ async def test_get_sensor_entity_ids(tm):
     assert tm.get_sensor_entity_ids(cfg) == ["sensor.a", "sensor.b"]
 
 
-@pytest.mark.xfail(
-    reason="BUG: freshness uses state.last_updated, which only changes when the value "
-    "changes; a steady room is treated as a dead sensor after 30 min (use last_reported)"
-)
 async def test_steady_sensor_still_reporting_is_not_stale(hass: HomeAssistant, tm, _frozen):
     cfg = {"sensors": ["sensor.hallway_temperature"]}
     set_temp(hass, "sensor.hallway_temperature", 19.0)
@@ -187,9 +179,6 @@ async def test_steady_sensor_still_reporting_is_not_stale(hass: HomeAssistant, t
     assert temp == 19.0
 
 
-@pytest.mark.xfail(
-    reason="BUG: the zone-average fallback has the same last_updated staleness problem"
-)
 async def test_zone_average_includes_steady_sensors(hass, tm, _frozen):
     set_temp(hass, "sensor.a", 18.0)
     for _ in range(8):
@@ -198,3 +187,20 @@ async def test_zone_average_includes_steady_sensors(hass, tm, _frozen):
     zones = zones_with({"r": {}, "a": {"sensors": ["sensor.a"]}})
     temp, _ = await read(tm, zones["z"]["rooms"]["r"], zones)
     assert temp == 18.0
+
+
+async def test_sensor_that_stops_reporting_still_times_out(hass, tm, _frozen):
+    """last_reported must not mask a genuinely dead sensor."""
+    cfg = {"sensors": ["sensor.a"]}
+    set_temp(hass, "sensor.a", 19.0)
+    _frozen.tick(timedelta(minutes=31))
+    temp, meta = await read(tm, cfg)
+    assert meta["sensors_status"][0]["status"] == "timeout"
+    assert temp is None
+
+
+async def test_last_seen_with_utc_offset_still_supported(hass, tm):
+    set_temp(hass, "sensor.t", 19.0)
+    hass.states.async_set("sensor.t_last_seen", "2026-01-14T20:00:00+00:00")   # == NOW (12:00 -08:00)
+    temp, meta = await read(tm, {"sensors": [{"temperature": "sensor.t", "last_seen": "sensor.t_last_seen"}]})
+    assert meta["sensors_status"][0]["status"] == "active"

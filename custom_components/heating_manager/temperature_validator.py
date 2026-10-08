@@ -35,6 +35,9 @@ class TemperatureValidator:
             return True
 
         if time_delta_seconds <= 0:
+            if current == previous:
+                # Re-reading an unchanged value is always plausible
+                return True
             # Invalid time delta
             _LOGGER.warning(
                 "Invalid time delta for plausibility check: %s seconds",

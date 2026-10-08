@@ -1,5 +1,5 @@
 """Temperature management for Heating Manager."""
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 from typing import Any
 
@@ -15,6 +15,16 @@ from .const import (
 from .temperature_validator import TemperatureValidator
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def state_last_reported(state) -> datetime:
+    """Return when an entity last reported, even if its value did not change.
+
+    state.last_updated only moves when the value or attributes change, so a
+    sensor sitting at a steady temperature would look dead. last_reported
+    (Home Assistant 2024.3+) moves on every report.
+    """
+    return getattr(state, "last_reported", None) or state.last_updated
 
 
 class TemperatureManager:
@@ -107,7 +117,7 @@ class TemperatureManager:
                         continue
 
                     # Determine last_seen timestamp
-                    # Priority: 1) last_seen sensor entity, 2) state.last_updated
+                    # Priority: 1) last_seen sensor entity, 2) state.last_reported
                     last_updated = None
 
                     if last_seen_sensor_id:
@@ -117,6 +127,11 @@ class TemperatureManager:
                             try:
                                 # Parse ISO format datetime: YYYY-MM-DDTHH:MM:SS+00:00
                                 last_updated = dt_util.parse_datetime(last_seen_state.state)
+                                if last_updated is not None and last_updated.tzinfo is None:
+                                    # No UTC offset given: assume HA's local time zone
+                                    last_updated = last_updated.replace(
+                                        tzinfo=dt_util.DEFAULT_TIME_ZONE
+                                    )
                                 sensor_info["last_seen_source"] = "dedicated_sensor"
                                 _LOGGER.debug(
                                     "Using dedicated last_seen sensor %s for %s: %s",
@@ -131,10 +146,10 @@ class TemperatureManager:
                                     err,
                                 )
 
-                    # Fallback to state.last_updated if no dedicated sensor or parsing failed
+                    # Fallback to the state's own report time if no dedicated sensor or parsing failed
                     if last_updated is None:
-                        last_updated = state.last_updated
-                        sensor_info["last_seen_source"] = "state_last_updated"
+                        last_updated = state_last_reported(state)
+                        sensor_info["last_seen_source"] = "state_last_reported"
 
                     sensor_info["value"] = temp
                     sensor_info["last_seen"] = last_updated.isoformat()
@@ -226,7 +241,7 @@ class TemperatureManager:
                 if state and state.state not in ("unknown", "unavailable"):
                     try:
                         temp = float(state.state)
-                        if current_time - state.last_updated < SENSOR_TIMEOUT:
+                        if current_time - state_last_reported(state) < SENSOR_TIMEOUT:
                             temps.append(temp)
                     except (ValueError, TypeError):
                         pass
