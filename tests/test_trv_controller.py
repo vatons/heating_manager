@@ -110,8 +110,9 @@ def test_legacy_detection_handles_empty_first_room(hass):
 
 
 @pytest.mark.xfail(
-    reason="BUG: EMA alpha 0.15/min forgets in ~6 min, so the 'learned' offset "
-    "chases radiator heat instead of learning the TRV's sensor bias"
+    reason="BUG?: EMA alpha 0.15/min forgets in ~6 min, so the 'learned' offset "
+    "chases radiator heat instead of learning the TRV's sensor bias. Undecided: a "
+    "thermal simulation showed little comfort difference with a slower alpha"
 )
 def test_learned_offset_is_stable_during_radiator_warm_up(ctrl):
     # Hours of steady state with a 1°C bias
@@ -123,16 +124,29 @@ def test_learned_offset_is_stable_during_radiator_warm_up(ctrl):
     assert ctrl._get_ema_offset("z", "r", TRV) < 2.0
 
 
-@pytest.mark.xfail(
-    reason="BUG: with no room temperature the learned offset is ignored, so a TRV "
-    "with a warm internal sensor closes even though the room is cold"
-)
 def test_unknown_room_temperature_still_applies_learned_offset(ctrl):
     for _ in range(50):
         setpoint(ctrl, 18.0, 20.0, 21.0, True)       # learn a +3 offset
     # Room sensor drops out; TRV internal still reads 21
     sp = setpoint(ctrl, None, 20.0, 21.0, True)
     assert sp > 21.0, "TRV must stay open while room needs heat"
+    assert sp == pytest.approx(23.0)                 # target + learned offset, no boost
+
+
+def test_unknown_room_temperature_does_not_change_learned_offset(ctrl):
+    setpoint(ctrl, 18.0, 20.0, 21.0, True)
+    setpoint(ctrl, None, 20.0, 30.0, True)
+    assert ctrl._get_ema_offset("z", "r", TRV) == pytest.approx(3.0)
+
+
+def test_unknown_room_temperature_without_history_uses_target(ctrl):
+    assert setpoint(ctrl, None, 20.0, 21.0, True) == 20.0
+
+
+def test_unknown_room_temperature_setpoint_is_bounded(hass):
+    ctrl = TRVController(hass)
+    ctrl.restore_offset_history({"z": {"r": {TRV: 15.0}}})
+    assert setpoint(ctrl, None, 20.0, 21.0, True) == 30.0
 
 
 # ---------------------------------------------------------------------------

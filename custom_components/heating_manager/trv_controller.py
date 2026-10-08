@@ -91,9 +91,21 @@ class TRVController:
         Returns:
             Optimal TRV setpoint temperature (°C)
         """
-        # Disabled or missing data - use exact target
-        if not self.enabled or room_temp is None or trv_internal_temp is None:
+        # Disabled or no TRV reading - use exact target
+        if not self.enabled or trv_internal_temp is None:
             return target_temp
+
+        # No room reading: nothing to learn from, but keep compensating for the
+        # TRV's known sensor bias. A plain target would shut a TRV whose internal
+        # sensor reads warm, leaving a cold room unheated.
+        if room_temp is None:
+            ema_offset = self._get_ema_offset(zone_id, room_id, trv_id)
+            setpoint = target_temp + ema_offset
+            _LOGGER.debug(
+                "Room temperature unknown, using target=%.1f°C + learned offset=%.1f°C = %.1f°C",
+                target_temp, ema_offset, setpoint
+            )
+            return max(TRV_MIN_SETPOINT, min(setpoint, self.max_absolute_setpoint))
 
         # Calculate current sensor offset
         current_offset = trv_internal_temp - room_temp
