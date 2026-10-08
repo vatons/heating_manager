@@ -585,7 +585,7 @@ async def test_every_ui_string_is_translated(hass, entry):
         os.remove(path)
     hass.config_entries.options.async_abort(flow_id)
     errors = strings["options"]["error"]
-    for key in ("file_not_found", "invalid_yaml", "not_yaml_file", "path_outside_config", "no_zones"):
+    for key in ("file_not_found", "invalid_yaml", "path_outside_config", "no_zones"):
         assert key in errors
     assert seen | {"init", "save"} >= set(steps) - {"save"}
 
@@ -750,7 +750,7 @@ async def test_import_yaml_in_subfolder_with_absolute_path(hass, entry, config_f
         ("hm_missing.yaml", None, "file_not_found"),
         ("hm_bad.yaml", "zones: [unclosed", "invalid_yaml"),
         ("hm_list.yaml", "- a\n- b\n", "invalid_yaml"),
-        ("hm_bad.txt", "zones: {}", "not_yaml_file"),
+        ("hm_empty_zones.txt", "zones: {}", "no_zones"),
         ("../outside.yaml", None, "path_outside_config"),
         ("/etc/hostname.yaml", None, "path_outside_config"),
         ("hm_nozones.yaml", "minimum_temp: 10\nrooms: {}\n", "no_zones"),
@@ -762,6 +762,14 @@ async def test_import_yaml_errors(hass, entry, config_file, path, text, error):
     flow_id, result = await start_import(hass, entry, path)
     assert result["step_id"] == "import_yaml"
     assert result["errors"] == {"base": error}
-    if error == "no_zones":
+    if path == "hm_nozones.yaml":
         assert result["description_placeholders"]["keys"] == "minimum_temp, rooms"
     hass.config_entries.options.async_abort(flow_id)
+
+
+async def test_import_yaml_from_backup_file_name(hass, entry, config_file):
+    """Any file name works, e.g. a dated backup of heating_manager.yaml."""
+    config_file("heating_manager.yaml.20261008", LEGACY_YAML)
+    flow_id, result = await start_import(hass, entry, "heating_manager.yaml.20261008")
+    assert result["step_id"] == "import_yaml_confirm"
+    assert "Downstairs: 2 room(s)" in result["description_placeholders"]["zones"]

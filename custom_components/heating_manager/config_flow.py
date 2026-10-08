@@ -186,10 +186,10 @@ class HeatingManagerOptionsFlow(OptionsFlow):
         full_path = os.path.realpath(
             path if os.path.isabs(path) else os.path.join(config_dir, path)
         )
+        # Any file name is fine (e.g. a dated backup like heating_manager.yaml.20261008):
+        # it must be inside the config folder and parse as a heating config.
         if os.path.commonpath([config_dir, full_path]) != config_dir:
             return None, "path_outside_config", full_path
-        if not full_path.lower().endswith((".yaml", ".yml")):
-            return None, "not_yaml_file", full_path
         try:
             with open(full_path, encoding="utf-8") as file:
                 content = yaml.safe_load(file)

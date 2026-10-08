@@ -191,6 +191,7 @@ You can configure how the zone heating demand is calculated using the `heating_d
 - More energy efficient - only heats when the overall zone is cold
 - Better for zones where rooms naturally vary in temperature
 - Prevents heating the whole zone for one cold room
+- Uses the same smart deadband as rooms: after the schedule (or an override) raises the average target, the zone heats as soon as it's 0.1°C below it; once the target is reached, it waits until the average drops below target minus the heating deadband
 
 **Configuration:** set the default in **Configure → Settings → Default heating demand mode**. To override it for one zone, use **Configure → Zones, rooms and schedules → (zone) → Name and heating demand mode**.
 

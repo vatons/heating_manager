@@ -363,11 +363,13 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
 
                 # Watchdog: track continuous heating demand duration
                 if zone_data["heating_demand"]:
+                    # UTC: local-time subtraction is wall-clock and off by an hour across DST
+                    now_utc = dt_util.utcnow()
                     if zone_id not in self._zone_heating_start:
-                        self._zone_heating_start[zone_id] = current_time
+                        self._zone_heating_start[zone_id] = now_utc
                     else:
                         duration_minutes = (
-                            current_time - self._zone_heating_start[zone_id]
+                            now_utc - self._zone_heating_start[zone_id]
                         ).total_seconds() / 60
                         if duration_minutes > DEFAULT_MAX_HEATING_DURATION:
                             _LOGGER.critical(
@@ -387,7 +389,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                             self.manual_zone_temp.pop(zone_id, None)
                             # Reset timer first so the safeguard repeats only if the
                             # condition persists, even if a TRV command below fails
-                            self._zone_heating_start[zone_id] = current_time
+                            self._zone_heating_start[zone_id] = now_utc
                             for room_id, room_data in zone_data["rooms"].items():
                                 for trv_id in room_data.get("trvs", []):
                                     await self.trv_controller.set_trv_setpoint(
