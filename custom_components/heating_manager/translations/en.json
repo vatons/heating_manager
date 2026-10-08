@@ -131,7 +131,7 @@
           "delete": "Delete this room"
         },
         "data_description": {
-          "trvs": "Radiator valves in this room. They are set automatically.",
+          "trvs": "Radiator valves in this room. They are set automatically. Each TRV can belong to one room only.",
           "sensors": "Room temperature sensors (averaged). Place them away from radiators. Without one, the room uses the zone's fallback.",
           "temperature_offset": "Run this room warmer (+) or cooler (−) than the zone schedule. Doesn't apply to boost, away mode or a temperature set on the room itself.",
           "configure_last_seen": "Optional. For sensors with a separate timestamp entity (e.g. Zigbee2MQTT last_seen), to detect dead sensors more reliably."
@@ -179,7 +179,7 @@
       },
       "import_yaml_confirm": {
         "title": "Import these zones?",
-        "description": "From {path}:\n\n{zones}\n\nSettings to apply: {settings}\n\nNothing is saved until you choose **Save and close**.",
+        "description": "From {path}:\n\n{zones}\n\nSettings to apply: {settings}\n\n{warnings}\n\nNothing is saved until you choose **Save and close**.",
         "data": {
           "confirm": "Import"
         }
@@ -193,7 +193,8 @@
       "file_not_found": "File not found: {path}",
       "invalid_yaml": "{path} isn't a valid YAML mapping. Check it in the File editor.",
       "path_outside_config": "The file must be inside your Home Assistant config folder.",
-      "no_zones": "No zones found in {path}. Top-level keys found: {keys}. The file needs a top-level 'zones:' section."
+      "no_zones": "No zones found in {path}. Top-level keys found: {keys}. The file needs a top-level 'zones:' section.",
+      "trv_in_use": "Already used by another room: {trv_conflict}. A TRV can only belong to one room."
     }
   },
   "selector": {
@@ -229,6 +230,10 @@
     "yaml_imported": {
       "title": "Heating Manager YAML configuration can be removed",
       "description": "Your Heating Manager configuration has been imported and is now managed in the UI (Settings → Devices & services → Heating Manager → Configure). Changes to the YAML are no longer used.\n\nRemove the `heating_manager:` entry from configuration.yaml and delete {config_file}, then restart Home Assistant."
+    },
+    "missing_entities": {
+      "title": "Heating Manager can't find some entities",
+      "description": "These entities are used by Heating Manager but are missing or disabled, so the rooms they belong to aren't fully controlled:\n\n{entities}\n\nIf you renamed or replaced a device, update the room in Settings → Devices & services → Heating Manager → Configure. If the device is offline or its integration failed to load, this notice clears by itself once it's back."
     }
   }
 }

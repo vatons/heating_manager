@@ -4,8 +4,9 @@ import logging
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -35,6 +36,8 @@ from .trv_manager import TRVManager
 _LOGGER = logging.getLogger(__name__)
 
 STATE_SAVE_DELAY = 300  # seconds; learned state is written at most this often
+MISSING_ENTITY_GRACE = timedelta(minutes=10)  # allow integrations to load after a restart
+MISSING_ENTITIES_ISSUE = "missing_entities"
 
 
 class _HeatingManagerStore(Store):
@@ -106,6 +109,8 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         self._loaded_state = False
         self._zone_heating_start: dict[str, Any] = {}  # zone_id -> datetime when demand started
         self.rooms_off: dict[str, list[str]] = {}  # zone_id -> room_ids switched off by the user
+        self._missing_since: dict[str, datetime] = {}  # entity_id -> first seen missing (UTC)
+        self._missing_issue_active = False
 
         # Initialize manager components
         self.temperature_manager = TemperatureManager(hass, fallback_mode)
@@ -411,6 +416,8 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             for zone_id in _expired_zone_overrides:
                 self.manual_zone_temp.pop(zone_id, None)
 
+            self._async_check_missing_entities(zones)
+
             if _state_changed:
                 await self._save_state()
             else:
@@ -508,6 +515,69 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         if room_temp is not None:
             base = max(base, room_temp)
         return base + DEFAULT_BOOST_TEMP_INCREASE
+
+    @callback
+    def _async_check_missing_entities(self, zones: dict) -> None:
+        """Raise a repair issue for configured TRVs/sensors that don't exist or are disabled.
+
+        An entity counts as missing once it has had no state and no registry entry
+        (or been disabled) for MISSING_ENTITY_GRACE, so integrations that load
+        slowly after a restart don't trigger it. The issue clears automatically.
+        """
+        now = dt_util.utcnow()
+        ent_reg = er.async_get(self.hass)
+        references: dict[str, str] = {}
+        for zone_id, zone in zones.items():
+            rooms = zone.get(CONF_ROOMS) if isinstance(zone, dict) else None
+            if not isinstance(rooms, dict):
+                continue
+            for room_id, room in rooms.items():
+                if not isinstance(room, dict):
+                    continue
+                where = f"{zone.get('name', zone_id)} / {room.get('name', room_id)}"
+                for trv_id in room.get("trvs") or []:
+                    references.setdefault(trv_id, f"TRV in {where}")
+                for sensor in room.get("sensors") or []:
+                    if isinstance(sensor, str):
+                        sensor = {"temperature": sensor}
+                    if not isinstance(sensor, dict):
+                        continue
+                    if sensor.get("temperature"):
+                        references.setdefault(sensor["temperature"], f"temperature sensor in {where}")
+                    if sensor.get("last_seen"):
+                        references.setdefault(sensor["last_seen"], f"last seen sensor in {where}")
+
+        problems = []
+        for entity_id, label in references.items():
+            registry_entry = ent_reg.async_get(entity_id)
+            if registry_entry is not None and registry_entry.disabled:
+                reason = "disabled"
+            elif self.hass.states.get(entity_id) is None and registry_entry is None:
+                reason = "not found"
+            else:
+                self._missing_since.pop(entity_id, None)
+                continue
+            since = self._missing_since.setdefault(entity_id, now)
+            if now - since >= MISSING_ENTITY_GRACE:
+                problems.append(f"- {entity_id} ({label}): {reason}")
+        for entity_id in set(self._missing_since) - set(references):
+            del self._missing_since[entity_id]
+
+        if problems:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                MISSING_ENTITIES_ISSUE,
+                is_fixable=False,
+                is_persistent=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=MISSING_ENTITIES_ISSUE,
+                translation_placeholders={"entities": "\n".join(sorted(problems))},
+            )
+            self._missing_issue_active = True
+        elif self._missing_issue_active:
+            ir.async_delete_issue(self.hass, DOMAIN, MISSING_ENTITIES_ISSUE)
+            self._missing_issue_active = False
 
     def is_room_off(self, zone_id: str, room_id: str) -> bool:
         """Whether the user has switched this room off."""

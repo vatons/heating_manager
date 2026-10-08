@@ -15,6 +15,7 @@ from .const import (
     TRV_PROPORTIONAL_BOOST_FACTOR,
     TRV_SMALL_DEFICIT_BOOST,
 )
+from .units import climate_attr_celsius, from_celsius, system_unit, to_celsius
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -318,17 +319,7 @@ class TRVController:
         """
         # Read TRV's internal temperature sensor
         trv_state = self.hass.states.get(trv_id)
-        trv_internal_temp = None
-
-        if trv_state and trv_state.attributes.get("current_temperature") is not None:
-            try:
-                trv_internal_temp = float(
-                    trv_state.attributes["current_temperature"]
-                )
-            except (ValueError, TypeError):
-                _LOGGER.warning(
-                    "Invalid current_temperature from TRV %s", trv_id
-                )
+        trv_internal_temp = climate_attr_celsius(self.hass, trv_state, "current_temperature")
 
         # Calculate optimal setpoint
         trv_setpoint = self.calculate_trv_setpoint(
@@ -337,10 +328,11 @@ class TRVController:
             learn_offset=learn_offset,
         )
 
-        # Fit the setpoint to what this TRV accepts. Home Assistant rejects a
-        # set_temperature outside the entity's min/max range, which would leave
-        # the TRV at its previous setpoint (e.g. shut while the room is cold).
-        trv_setpoint = self._apply_trv_limits(trv_id, trv_state, trv_setpoint)
+        # Fit the setpoint to what this TRV accepts (in its unit). Home Assistant
+        # rejects a set_temperature outside the entity's min/max range, which would
+        # leave the TRV at its previous setpoint (e.g. shut while the room is cold).
+        command = self._apply_trv_limits(trv_id, trv_state, trv_setpoint)
+        trv_setpoint = to_celsius(command, system_unit(self.hass))
 
         # Send command to TRV
         try:
@@ -368,7 +360,7 @@ class TRVController:
             await self.hass.services.async_call(
                 "climate",
                 "set_temperature",
-                {"entity_id": trv_id, "temperature": trv_setpoint},
+                {"entity_id": trv_id, "temperature": command},
                 blocking=True,
             )
 
@@ -391,12 +383,12 @@ class TRVController:
         Errors are logged rather than raised, so one unreachable TRV cannot
         break the caller. Returns True if the command was delivered.
         """
-        setpoint = self._apply_trv_limits(trv_id, self.hass.states.get(trv_id), setpoint)
+        command = self._apply_trv_limits(trv_id, self.hass.states.get(trv_id), setpoint)
         try:
             await self.hass.services.async_call(
                 "climate",
                 "set_temperature",
-                {"entity_id": trv_id, "temperature": setpoint},
+                {"entity_id": trv_id, "temperature": command},
                 blocking=True,
             )
         except Exception as err:
@@ -404,9 +396,13 @@ class TRVController:
             return False
         return True
 
-    @staticmethod
-    def _apply_trv_limits(trv_id: str, trv_state: Any, setpoint: float) -> float:
-        """Round a setpoint to the TRV's step and clamp it to its min/max range."""
+    def _apply_trv_limits(self, trv_id: str, trv_state: Any, setpoint: float) -> float:
+        """Convert a °C setpoint to the TRV's unit, round to its step and clamp to its range.
+
+        Climate entities express min/max/step and accept set_temperature in Home
+        Assistant's unit system, so the result is in that unit.
+        """
+        setpoint = from_celsius(setpoint, system_unit(self.hass))
         if trv_state is None:
             return setpoint
 

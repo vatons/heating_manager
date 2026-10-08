@@ -5,6 +5,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import CONF_TRVS
 from .trv_controller import TRVController
+from .units import climate_attr_celsius
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,13 +65,7 @@ class TRVManager:
         trv_data = {}
         for trv_id in trvs:
             trv_state = hass.states.get(trv_id)
-            trv_internal_temp = None
-
-            if trv_state and trv_state.attributes.get("current_temperature") is not None:
-                try:
-                    trv_internal_temp = float(trv_state.attributes["current_temperature"])
-                except (ValueError, TypeError):
-                    pass
+            trv_internal_temp = climate_attr_celsius(hass, trv_state, "current_temperature")
 
             # Calculate current offset
             current_offset = None
@@ -83,12 +78,7 @@ class TRVManager:
                 avg_offset = self.trv_controller._get_ema_offset(zone_id, room_id, trv_id)
 
             # Get last setpoint from TRV state
-            trv_setpoint = None
-            if trv_state and trv_state.attributes.get("temperature"):
-                try:
-                    trv_setpoint = float(trv_state.attributes["temperature"])
-                except (ValueError, TypeError):
-                    pass
+            trv_setpoint = climate_attr_celsius(hass, trv_state, "temperature")
 
             trv_data[trv_id] = {
                 "trv_internal_temp": trv_internal_temp,

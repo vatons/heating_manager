@@ -21,6 +21,7 @@ from custom_components.heating_manager.entry_data import (
     new_options,
     options_to_runtime,
     period_minutes,
+    room_unique_id,
     unique_id_for,
     yaml_to_options,
 )
@@ -401,7 +402,7 @@ async def test_edit_room_keeps_last_seen_and_deletes(hass, entry):
 
     # Delete the room: its entity is removed
     ent_reg = er.async_get(hass)
-    assert ent_reg.async_get_entity_id("climate", DOMAIN, "heating_manager_downstairs_lounge")
+    assert ent_reg.async_get_entity_id("climate", DOMAIN, room_unique_id("downstairs", "lounge"))
     flow_id = await open_options(hass, entry)
     await menu(hass, flow_id, "zones")
     await form(hass, flow_id, {"zone": "downstairs"})
@@ -411,7 +412,7 @@ async def test_edit_room_keeps_last_seen_and_deletes(hass, entry):
     assert result["step_id"] == "rooms"
     await save(hass, flow_id, "room")
     assert entry.options["zones"]["downstairs"]["rooms"] == {}
-    assert ent_reg.async_get_entity_id("climate", DOMAIN, "heating_manager_downstairs_lounge") is None
+    assert ent_reg.async_get_entity_id("climate", DOMAIN, room_unique_id("downstairs", "lounge")) is None
 
 
 async def test_delete_period_and_zone(hass, entry):
@@ -773,3 +774,69 @@ async def test_import_yaml_from_backup_file_name(hass, entry, config_file):
     flow_id, result = await start_import(hass, entry, "heating_manager.yaml.20261008")
     assert result["step_id"] == "import_yaml_confirm"
     assert "Downstairs: 2 room(s)" in result["description_placeholders"]["zones"]
+
+
+# ---------------------------------------------------------------------------
+# Unique ids
+# ---------------------------------------------------------------------------
+
+def two_zone_options():
+    options = new_options()
+    options["zones"]["up"] = {"name": "Up", "schedule": {}, "rooms": {
+        "stairs_bed": {"name": "Stairs Bed", "trvs": ["climate.lounge_trv"], "sensors": []}}}
+    options["zones"]["up_stairs"] = {"name": "Up Stairs", "schedule": {}, "rooms": {
+        "bed": {"name": "Bed", "trvs": ["climate.study_trv"], "sensors": []}}}
+    return options
+
+
+async def test_zone_and_room_ids_that_used_to_collide_get_separate_entities(hass, env):
+    """Zone 'up' + room 'stairs_bed' and zone 'up_stairs' + room 'bed' were one unique id."""
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options=two_zone_options())
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert hass.states.get("climate.up_stairs_bed") is not None
+    assert hass.states.get("climate.up_stairs_bed_2") is not None        # second room now exists
+    ent_reg = er.async_get(hass)
+    assert ent_reg.async_get_entity_id("climate", DOMAIN, room_unique_id("up", "stairs_bed"))
+    assert ent_reg.async_get_entity_id("climate", DOMAIN, room_unique_id("up_stairs", "bed"))
+
+
+async def test_unique_ids_migrated_keeping_entity_ids(hass, env):
+    """Entities from 2.0/2.1 (old unique ids, owned by the entry) keep their entity ids."""
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options=base_options())
+    entry.add_to_hass(hass)
+    ent_reg = er.async_get(hass)
+    for old, object_id in [
+        ("heating_manager_downstairs_lounge", "my_lounge"),
+        ("heating_manager_downstairs_zone", "my_downstairs"),
+        ("heating_manager_global", "my_heating"),
+    ]:
+        ent_reg.async_get_or_create(
+            "climate", DOMAIN, old, suggested_object_id=object_id, config_entry=entry
+        )
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    for entity_id, unique_id in [
+        ("climate.my_lounge", "heating_manager:room:downstairs:lounge"),
+        ("climate.my_downstairs", "heating_manager:zone:downstairs"),
+        ("climate.my_heating", "heating_manager:global"),
+    ]:
+        assert ent_reg.async_get(entity_id).unique_id == unique_id
+        assert hass.states.get(entity_id) is not None
+    assert not [e for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+                if not e.unique_id.startswith("heating_manager:")]
+
+
+async def test_collided_legacy_id_migrates_to_first_room(hass, env):
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options=two_zone_options())
+    entry.add_to_hass(hass)
+    ent_reg = er.async_get(hass)
+    ent_reg.async_get_or_create(
+        "climate", DOMAIN, "heating_manager_up_stairs_bed", suggested_object_id="kept", config_entry=entry
+    )
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert ent_reg.async_get("climate.kept").unique_id == room_unique_id("up", "stairs_bed")
+    assert ent_reg.async_get_entity_id("climate", DOMAIN, room_unique_id("up_stairs", "bed"))

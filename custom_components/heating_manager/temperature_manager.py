@@ -1,5 +1,6 @@
 """Temperature management for Heating Manager."""
 from datetime import datetime, timedelta
+from statistics import median
 import logging
 from typing import Any
 
@@ -17,6 +18,7 @@ from .const import (
     SENSOR_TIMEOUT,
 )
 from .temperature_validator import TemperatureValidator
+from .units import climate_attr_celsius, sensor_celsius
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -76,8 +78,10 @@ class TemperatureManager:
         }
 
         if not sensors:
-            # No sensors: use the configured fallback
-            return await self._fallback_temperature(zone_id, room_config, all_zones, metadata)
+            # No sensors configured: the room's own TRVs are the best guess, then the zone
+            return await self._fallback_temperature(
+                zone_id, room_config, all_zones, metadata, prefer_trv=True
+            )
 
         valid_temps = []
         sensors_status = []
@@ -112,7 +116,7 @@ class TemperatureManager:
 
             if state and state.state not in ("unknown", "unavailable"):
                 try:
-                    temp = float(state.state)
+                    temp = sensor_celsius(state)
 
                     # Validate reading is physically plausible
                     previous_data = self.last_sensor_values.get(temp_sensor_id)
@@ -195,9 +199,13 @@ class TemperatureManager:
         if most_recent_time:
             metadata["last_seen"] = most_recent_time.isoformat()
 
-        # If we have valid temps, return average
+        # Combine fresh readings: the median with three or more sensors, so one
+        # outlier (a sensor by a fridge, oven or window) can't skew the room; the
+        # mean otherwise
         if valid_temps:
             metadata["source"] = "local_sensors"
+            if len(valid_temps) >= 3:
+                return median(valid_temps), metadata
             return sum(valid_temps) / len(valid_temps), metadata
 
         # Try to use last known values if within timeout
@@ -222,30 +230,39 @@ class TemperatureManager:
 
         return await self._fallback_temperature(zone_id, room_config, all_zones, metadata)
 
+    def _trv_temperature(self, room_config: dict) -> float | None:
+        """Average internal temperature (°C) of the room's available TRVs."""
+        trv_temps = []
+        for trv_id in room_config.get(CONF_TRVS, []):
+            state = self.hass.states.get(trv_id)
+            if state is None or state.state in ("unknown", "unavailable"):
+                continue
+            value = climate_attr_celsius(self.hass, state, "current_temperature")
+            if value is not None and self._validator.is_in_valid_range(value):
+                trv_temps.append(value)
+        return sum(trv_temps) / len(trv_temps) if trv_temps else None
+
     async def _fallback_temperature(
-        self, zone_id: str, room_config: dict, all_zones: dict, metadata: dict
+        self,
+        zone_id: str,
+        room_config: dict,
+        all_zones: dict,
+        metadata: dict,
+        prefer_trv: bool = False,
     ) -> tuple[float | None, dict]:
         """Room temperature when no fresh sensor reading exists, per fallback_mode.
 
-        "trv" and "last_known" fall back to the zone average if they have no data.
+        prefer_trv (rooms with no sensors configured) uses the TRVs regardless of
+        fallback_mode. "trv" and "last_known" fall back to the zone average if
+        they have no data.
         """
-        if self.fallback_mode == FALLBACK_MODE_TRV:
-            trv_temps = []
-            for trv_id in room_config.get(CONF_TRVS, []):
-                state = self.hass.states.get(trv_id)
-                if state is None or state.state in ("unknown", "unavailable"):
-                    continue
-                try:
-                    value = float(state.attributes.get("current_temperature"))
-                except (TypeError, ValueError):
-                    continue
-                if self._validator.is_in_valid_range(value):
-                    trv_temps.append(value)
-            if trv_temps:
+        if prefer_trv or self.fallback_mode == FALLBACK_MODE_TRV:
+            trv_temp = self._trv_temperature(room_config)
+            if trv_temp is not None:
                 metadata["source"] = "trv"
-                return sum(trv_temps) / len(trv_temps), metadata
+                return trv_temp, metadata
 
-        elif self.fallback_mode == FALLBACK_MODE_LAST_KNOWN:
+        if self.fallback_mode == FALLBACK_MODE_LAST_KNOWN:
             latest: tuple[datetime, float] | None = None
             for temp_sensor_id in self.get_sensor_entity_ids(room_config):
                 candidates = []
@@ -255,7 +272,7 @@ class TemperatureManager:
                 state = self.hass.states.get(temp_sensor_id)
                 if state is not None and state.state not in ("unknown", "unavailable"):
                     try:
-                        value = float(state.state)
+                        value = sensor_celsius(state)
                     except (TypeError, ValueError):
                         value = None
                     if value is not None and self._validator.is_in_valid_range(value):
@@ -303,7 +320,7 @@ class TemperatureManager:
                 state = self.hass.states.get(temp_sensor_id)
                 if state and state.state not in ("unknown", "unavailable"):
                     try:
-                        temp = float(state.state)
+                        temp = sensor_celsius(state)
                         if current_time - state_last_reported(state) < SENSOR_TIMEOUT:
                             temps.append(temp)
                     except (ValueError, TypeError):
