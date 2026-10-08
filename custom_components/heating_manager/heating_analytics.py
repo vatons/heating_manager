@@ -49,8 +49,8 @@ class HeatingAnalytics:
             needs_heating: Whether the room currently needs heating
             timestamp: Timestamp of reading (defaults to now)
         """
-        if timestamp is None:
-            timestamp = dt_util.now()
+        # Stored in UTC so rates aren't distorted by a daylight-saving change
+        timestamp = dt_util.utcnow() if timestamp is None else dt_util.as_utc(timestamp)
 
         # Initialize storage if needed
         if zone_id not in self.temp_history:
@@ -260,8 +260,7 @@ class HeatingAnalytics:
         time_minutes = int(time_hours * 60)
 
         # Calculate ETA timestamp
-        now = dt_util.now()
-        eta_timestamp = now + timedelta(minutes=time_minutes)
+        eta_timestamp = dt_util.as_local(dt_util.utcnow() + timedelta(minutes=time_minutes))
 
         # Calculate confidence based on sample count
         history_count = len(self.temp_history.get(zone_id, {}).get(room_id, []))

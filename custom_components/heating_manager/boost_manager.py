@@ -98,8 +98,9 @@ class BoostManager:
         if duration is None:
             duration = self.boost_duration
 
-        current_time = dt_util.now()
-        end_time = current_time + timedelta(minutes=duration)
+        # UTC: adding minutes to a local time is wall-clock arithmetic, which
+        # makes a boost an hour short or long across a daylight-saving change
+        end_time = dt_util.utcnow() + timedelta(minutes=duration)
 
         if temperature is None:
             # Get current room temperature and add boost
@@ -206,7 +207,7 @@ class BoostManager:
 
         Only restores boost entries that haven't expired.
         """
-        current_time = dt_util.now()
+        current_time = dt_util.utcnow()
 
         for zone_id, rooms in stored_boost.items():
             for room_id, boost_info in rooms.items():

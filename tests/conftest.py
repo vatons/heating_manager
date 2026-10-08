@@ -125,6 +125,11 @@ class FakeTRV(ClimateEntity):
         self._attr_hvac_mode = hvac_mode
         self.async_write_ha_state()
 
+    def set_available(self, available: bool) -> None:
+        """Simulate the TRV dropping off the network (e.g. flat battery) and returning."""
+        self._attr_available = available
+        self.async_write_ha_state()
+
     def set_internal_temperature(self, value: float | None) -> None:
         self._attr_current_temperature = value
         self.async_write_ha_state()
