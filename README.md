@@ -788,9 +788,12 @@ The test suite runs against a real Home Assistant core using
 TRVs are simulated by a small in-test climate platform, so Home Assistant's own
 `climate.set_temperature` validation is exercised as it is in production.
 
+The tests target Home Assistant 2026.10, which requires Python 3.14. With
+[uv](https://docs.astral.sh/uv/) (it downloads Python 3.14 if needed):
+
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements_test.txt
+uv venv --python 3.14 .venv
+uv pip install --python .venv/bin/python -r requirements_test.txt
 .venv/bin/pytest
 ```
 

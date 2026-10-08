@@ -219,8 +219,12 @@ def single_room_config(
 
 
 @pytest.fixture
-def make_coordinator(hass: HomeAssistant):
-    """Build a HeatingManagerCoordinator with sensible defaults."""
+async def make_coordinator(hass: HomeAssistant):
+    """Build a HeatingManagerCoordinator with sensible defaults.
+
+    Coordinators are shut down at teardown so no refresh debouncer timers linger.
+    """
+    created: list[HeatingManagerCoordinator] = []
 
     def _make(config: dict, **overrides) -> HeatingManagerCoordinator:
         kwargs = dict(
@@ -241,6 +245,10 @@ def make_coordinator(hass: HomeAssistant):
             derivative_smoothing=DEFAULT_DERIVATIVE_SMOOTHING,
         )
         kwargs.update(overrides)
-        return HeatingManagerCoordinator(hass, config, **kwargs)
+        coordinator = HeatingManagerCoordinator(hass, config, **kwargs)
+        created.append(coordinator)
+        return coordinator
 
-    return _make
+    yield _make
+    for coordinator in created:
+        await coordinator.async_shutdown()

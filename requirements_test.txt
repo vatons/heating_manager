@@ -1,1 +1,2 @@
-pytest-homeassistant-custom-component
+# Home Assistant 2026.10.0 (requires Python 3.14)
+pytest-homeassistant-custom-component==0.13.371

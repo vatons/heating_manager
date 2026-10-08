@@ -63,7 +63,9 @@ async def setup_hm(hass: HomeAssistant, add_trvs, tmp_path, freezer):
         await hass.async_block_till_done()
         return ok, trvs
 
-    return _setup
+    yield _setup
+    if DOMAIN in hass.data:
+        await hass.data[DOMAIN]["coordinator"].async_shutdown()
 
 
 def coord(hass):
