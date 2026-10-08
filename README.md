@@ -779,6 +779,26 @@ Can be set globally or overridden per-zone in `heating_manager.yaml`.
 - Ensure times don't overlap
 - When no schedule is active, uses `minimum_temp` setting
 
+## Development
+
+### Running the tests
+
+The test suite runs against a real Home Assistant core using
+[pytest-homeassistant-custom-component](https://github.com/MatthewFlamm/pytest-homeassistant-custom-component).
+TRVs are simulated by a small in-test climate platform, so Home Assistant's own
+`climate.set_temperature` validation is exercised as it is in production.
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements_test.txt
+.venv/bin/pytest
+```
+
+Known bugs are captured as `xfail(strict=True)` tests whose `reason` starts with
+`BUG:`. List them with `.venv/bin/pytest -rx`. When a fix makes one of these tests
+pass, pytest reports it as a failure (`XPASS(strict)`) until the `xfail` marker is
+removed, so fixed bugs stay covered as regression tests.
+
 ## Support
 
 For issues, feature requests, or contributions:

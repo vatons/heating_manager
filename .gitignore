@@ -1,2 +1,7 @@
 #ignore the python cache directory
 **/__pycache__/
+
+# Test environment
+.venv/
+.pytest_cache/
+.coverage
