@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Set up Heating Manager",
-        "description": "Name your first heating zone (an area served by one boiler or heating circuit, e.g. Downstairs). It starts with a simple 06:30–22:00 schedule at 19°C.\n\nAfterwards, use **Configure** on the integration to add rooms (TRVs and temperature sensors), edit schedules and change settings.",
+        "description": "Name your first heating zone (an area on one heating circuit, e.g. Downstairs). It starts with a 06:30–22:00 schedule at 19°C.\n\nThen use **Add room** on the integration page to add rooms with their TRVs and temperature sensors, and **Add zone** for more zones. The cog opens settings.",
         "data": {
           "name": "Zone name"
         }
@@ -13,7 +13,7 @@
       "name_required": "Please enter a name."
     },
     "abort": {
-      "single_instance_allowed": "Heating Manager is already set up. Use Configure on the existing entry to add zones and rooms.",
+      "single_instance_allowed": "Heating Manager is already set up. Use Add zone and Add room on its integration page.",
       "already_configured": "Heating Manager is already set up."
     }
   },
@@ -21,152 +21,111 @@
     "step": {
       "init": {
         "title": "Heating Manager",
-        "description": "Choose what to change. Changes are applied when you select **Save and close**.",
+        "description": "Zones and rooms are managed on the integration page.",
         "menu_options": {
-          "zones": "Zones, rooms and schedules",
           "settings": "Settings",
-          "advanced": "Advanced settings",
-          "import_yaml": "Import from YAML file",
-          "save": "Save and close"
+          "import_yaml": "Import from YAML file"
         }
       },
       "settings": {
         "title": "Settings",
-        "data": {
-          "minimum_temp": "Temperature outside schedule",
-          "frost_protection_temp": "Away / frost protection temperature",
-          "heating_demand_mode": "Default heating demand mode",
-          "fallback_mode": "When a room's sensors are unavailable",
-          "heating_deadband": "Heating deadband",
-          "boost_duration": "Default boost duration"
-        },
-        "data_description": {
-          "minimum_temp": "Target used when no schedule period is active.",
-          "frost_protection_temp": "Target for every room while away mode is on.",
-          "heating_demand_mode": "How a zone decides it needs heat: when any room is below target, or when the zone's average is below its average target. Zones can override this.",
-          "fallback_mode": "Used when a room has no sensor reading from the last 30 minutes.",
-          "heating_deadband": "Once a room has reached its target, how far it may cool before heating again. Smaller is tighter control but more cycling.",
-          "boost_duration": "How long a boost lasts when no duration is given."
-        }
-      },
-      "advanced": {
-        "title": "Advanced settings",
-        "description": "Defaults suit most homes; change these only if you know you need to.",
-        "data": {
-          "update_interval": "Update interval",
-          "trv_overshoot_enabled": "Smart TRV control",
-          "trv_overshoot_max": "Maximum TRV boost",
-          "trv_overshoot_threshold": "Overshoot threshold",
-          "trv_cooldown_offset": "Cooldown offset",
-          "trv_offset_ema_alpha": "TRV offset learning rate",
-          "analytics_enabled": "Heating analytics",
-          "analytics_history_size": "Analytics history size",
-          "analytics_min_samples": "Analytics minimum samples",
-          "derivative_smoothing_factor": "Analytics smoothing",
-          "min_boiler_on_time": "Minimum boiler on time",
-          "min_boiler_off_time": "Minimum boiler off time"
-        },
-        "data_description": {
-          "update_interval": "How often rooms are checked and TRVs updated.",
-          "trv_overshoot_enabled": "Compensate for TRVs whose built-in sensor reads warmer than the room, by learning the difference and setting TRVs higher while a room heats. When off, TRVs are set to the room target.",
-          "trv_overshoot_max": "Most a TRV setpoint is raised above target (plus learned offset) for a cold room. Increase if rooms heat slowly.",
-          "trv_overshoot_threshold": "How far above target a room may get before its TRVs are set low to cool it.",
-          "trv_cooldown_offset": "How far below target TRVs are set while a room is too warm.",
-          "trv_offset_ema_alpha": "How quickly the learned TRV/room sensor difference follows new readings (higher = faster).",
-          "analytics_enabled": "Track heating and cooling rates and estimate time to reach target.",
-          "analytics_history_size": "Readings kept per room for analytics.",
-          "analytics_min_samples": "Readings needed before rates are estimated.",
-          "derivative_smoothing_factor": "Smoothing applied to heating/cooling rates (higher = more responsive).",
-          "min_boiler_on_time": "Once a zone (and the global entity) starts calling for heat, keep calling for at least this long. Protects the boiler from short-cycling. 0 = off.",
-          "min_boiler_off_time": "Once heat demand stops, wait at least this long before calling for heat again. 0 = off."
-        }
-      },
-      "zones": {
-        "title": "Zones",
-        "description": "Pick a zone to edit its rooms and schedule, or add a new one.",
-        "data": {
-          "zone": "Zone"
-        }
-      },
-      "zone": {
-        "title": "Zone: {zone}",
-        "menu_options": {
-          "rooms": "Rooms",
-          "schedule": "Schedule",
-          "zone_edit": "Name, demand mode and monitoring",
-          "zone_delete": "Delete this zone",
-          "zones": "Back to zones",
-          "save": "Save and close"
-        }
-      },
-      "zone_edit": {
-        "title": "Zone settings",
-        "data": {
-          "name": "Name",
-          "heating_demand_mode": "Heating demand mode",
-          "monitoring_only": "Monitoring only"
-        },
-        "data_description": {
-          "heating_demand_mode": "When this zone calls for heat. Its climate entity shows 'heating' then, for driving a boiler automation.",
-          "monitoring_only": "Show this zone's room temperatures without heating: it never calls for heat (so it can't switch the boiler on) and its TRVs, if any, are left alone."
-        }
-      },
-      "zone_delete": {
-        "title": "Delete {zone}?",
-        "description": "This removes the zone, its rooms and their climate entities.",
-        "data": {
-          "confirm": "Yes, delete this zone"
-        }
-      },
-      "rooms": {
-        "title": "Rooms in {zone}",
-        "data": {
-          "room": "Room"
-        }
-      },
-      "room": {
-        "title": "Room in {zone}",
-        "data": {
-          "name": "Name",
-          "trvs": "TRVs",
-          "sensors": "Temperature sensors",
-          "temperature_offset": "Temperature offset",
-          "configure_last_seen": "Set 'last seen' sensors for the temperature sensors",
-          "delete": "Delete this room"
-        },
-        "data_description": {
-          "trvs": "Radiator valves in this room. They are set automatically. Each TRV can belong to one room only.",
-          "sensors": "Room temperature sensors (averaged). Place them away from radiators. Without one, the room uses the zone's fallback.",
-          "temperature_offset": "Run this room warmer (+) or cooler (−) than the zone schedule. Doesn't apply to boost, away mode or a temperature set on the room itself.",
-          "configure_last_seen": "Optional. For sensors with a separate timestamp entity (e.g. Zigbee2MQTT last_seen), to detect dead sensors more reliably."
-        }
-      },
-      "room_last_seen": {
-        "title": "Last seen sensors for {room}",
-        "description": "For each temperature sensor, optionally pick the sensor holding when it last reported. Leave empty to use Home Assistant's own report time."
-      },
-      "schedule": {
-        "title": "Schedule for {zone}",
-        "description": "Weekdays are Monday–Friday; weekends are Saturday and Sunday.",
-        "data": {
-          "day": "Edit"
-        }
-      },
-      "schedule_day": {
-        "title": "{zone}: {day} schedule",
-        "description": "Pick a period to edit or delete, or add one. Outside these periods the zone uses the 'temperature outside schedule' setting.",
-        "data": {
-          "period": "Period"
-        }
-      },
-      "period": {
-        "title": "Schedule period ({day})",
-        "description": "A period ending at or before its start runs past midnight (e.g. 22:00–06:00). Use 00:00 as the end for 'until midnight', or the same start and end for all day.",
-        "data": {
-          "start": "Start",
-          "end": "End",
-          "temperature": "Temperature",
-          "delete": "Delete this period"
+        "sections": {
+          "temperatures": {
+            "name": "Temperatures",
+            "data": {
+              "minimum_temp": "Temperature outside schedule",
+              "frost_protection_temp": "Away / frost protection temperature"
+            },
+            "data_description": {
+              "minimum_temp": "Target used when no schedule period is active.",
+              "frost_protection_temp": "Target for every room while away mode is on."
+            }
+          },
+          "heating_demand": {
+            "name": "Heating demand",
+            "data": {
+              "heating_demand_mode": "Default heating demand mode",
+              "heating_deadband": "Heating deadband"
+            },
+            "data_description": {
+              "heating_demand_mode": "How a zone decides it needs heat: when any room is below target, or when the zone's average is below its average target. Zones can override this.",
+              "heating_deadband": "Once a room has reached its target, how far it may cool before heating again. Smaller is tighter control but more cycling."
+            }
+          },
+          "boiler": {
+            "name": "Boiler protection",
+            "data": {
+              "min_boiler_on_time": "Minimum boiler on time",
+              "min_boiler_off_time": "Minimum boiler off time"
+            },
+            "data_description": {
+              "min_boiler_on_time": "Once a zone (and the global entity) starts calling for heat, keep calling for at least this long. Protects the boiler from short-cycling. 0 = off.",
+              "min_boiler_off_time": "Once heat demand stops, wait at least this long before calling for heat again. 0 = off."
+            },
+            "description": "Stop the boiler short-cycling. 0 = off."
+          },
+          "sensors": {
+            "name": "Sensors",
+            "data": {
+              "fallback_mode": "When a room's sensors are unavailable"
+            },
+            "data_description": {
+              "fallback_mode": "Used when a room has no sensor reading from the last 30 minutes."
+            }
+          },
+          "boost": {
+            "name": "Boost",
+            "data": {
+              "boost_duration": "Default boost duration"
+            },
+            "data_description": {
+              "boost_duration": "How long a boost lasts when no duration is given."
+            }
+          },
+          "trv_control": {
+            "name": "TRV control",
+            "data": {
+              "trv_overshoot_enabled": "Smart TRV control",
+              "trv_overshoot_max": "Maximum TRV boost",
+              "trv_overshoot_threshold": "Overshoot threshold",
+              "trv_cooldown_offset": "Cooldown offset",
+              "trv_offset_ema_alpha": "TRV offset learning rate"
+            },
+            "data_description": {
+              "trv_overshoot_enabled": "Compensate for TRVs whose built-in sensor reads warmer than the room, by learning the difference and setting TRVs higher while a room heats. When off, TRVs are set to the room target.",
+              "trv_overshoot_max": "Most a TRV setpoint is raised above target (plus learned offset) for a cold room. Increase if rooms heat slowly.",
+              "trv_overshoot_threshold": "How far above target a room may get before its TRVs are set low to cool it.",
+              "trv_cooldown_offset": "How far below target TRVs are set while a room is too warm.",
+              "trv_offset_ema_alpha": "How quickly the learned TRV/room sensor difference follows new readings (higher = faster)."
+            },
+            "description": "Advanced: the defaults suit most homes."
+          },
+          "analytics": {
+            "name": "Analytics",
+            "data": {
+              "analytics_enabled": "Heating analytics",
+              "analytics_history_size": "Analytics history size",
+              "analytics_min_samples": "Analytics minimum samples",
+              "derivative_smoothing_factor": "Analytics smoothing"
+            },
+            "data_description": {
+              "analytics_enabled": "Track heating and cooling rates and estimate time to reach target.",
+              "analytics_history_size": "Readings kept per room for analytics.",
+              "analytics_min_samples": "Readings needed before rates are estimated.",
+              "derivative_smoothing_factor": "Smoothing applied to heating/cooling rates (higher = more responsive)."
+            },
+            "description": "Advanced."
+          },
+          "updates": {
+            "name": "Updates",
+            "data": {
+              "update_interval": "Update interval"
+            },
+            "data_description": {
+              "update_interval": "How often rooms are checked and TRVs updated."
+            },
+            "description": "Advanced."
+          }
         }
       },
       "import_yaml": {
@@ -183,22 +142,174 @@
       },
       "import_yaml_confirm": {
         "title": "Import these zones?",
-        "description": "From {path}:\n\n{zones}\n\nSettings to apply: {settings}\n\n{warnings}\n\nNothing is saved until you choose **Save and close**.",
+        "description": "From {path}:\n\n{zones}\n\nSettings to apply: {settings}\n\n{warnings}",
         "data": {
           "confirm": "Import"
         }
       }
     },
     "error": {
-      "name_required": "Please enter a name.",
-      "room_empty": "Add at least one TRV or temperature sensor.",
-      "invalid_time": "Enter valid start and end times.",
-      "overlap": "This period overlaps another one on the same day.",
       "file_not_found": "File not found: {path}",
       "invalid_yaml": "{path} isn't a valid YAML mapping. Check it in the File editor.",
       "path_outside_config": "The file must be inside your Home Assistant config folder.",
-      "no_zones": "No zones found in {path}. Top-level keys found: {keys}. The file needs a top-level 'zones:' section.",
-      "trv_in_use": "Already used by another room: {trv_conflict}. A TRV can only belong to one room."
+      "no_zones": "No zones found in {path}. Top-level keys found: {keys}. The file needs a top-level 'zones:' section."
+    }
+  },
+  "config_subentries": {
+    "zone": {
+      "entry_type": "Zone",
+      "initiate_flow": {
+        "user": "Add zone"
+      },
+      "step": {
+        "user": {
+          "title": "Add zone",
+          "description": "A zone is an area on one heating circuit. Add its rooms with **Add room** on the integration page.",
+          "data": {
+            "name": "Name",
+            "heating_demand_mode": "Heating demand mode",
+            "monitoring_only": "Monitoring only"
+          },
+          "data_description": {
+            "heating_demand_mode": "When this zone calls for heat. Its climate entity shows 'heating' then, for your boiler automation.",
+            "monitoring_only": "Show this zone's room temperatures without heating: it never calls for heat and its TRVs, if any, are left alone."
+          },
+          "sections": {
+            "weekday": {
+              "name": "Weekday schedule",
+              "description": "Monday to Friday. Outside these periods the zone uses the 'temperature outside schedule' setting. A period ending at or before its start runs past midnight; use 00:00 as the end for 'until midnight'.",
+              "data": {
+                "periods": "Periods"
+              }
+            },
+            "weekend": {
+              "name": "Weekend schedule",
+              "description": "Saturday and Sunday.",
+              "data": {
+                "same_as_weekdays": "Same as weekdays",
+                "periods": "Periods"
+              },
+              "data_description": {
+                "periods": "Used when 'Same as weekdays' is off."
+              }
+            }
+          }
+        },
+        "reconfigure": {
+          "title": "Reconfigure zone",
+          "description": "A zone is an area on one heating circuit. Add its rooms with **Add room** on the integration page.",
+          "data": {
+            "name": "Name",
+            "heating_demand_mode": "Heating demand mode",
+            "monitoring_only": "Monitoring only"
+          },
+          "data_description": {
+            "heating_demand_mode": "When this zone calls for heat. Its climate entity shows 'heating' then, for your boiler automation.",
+            "monitoring_only": "Show this zone's room temperatures without heating: it never calls for heat and its TRVs, if any, are left alone."
+          },
+          "sections": {
+            "weekday": {
+              "name": "Weekday schedule",
+              "description": "Monday to Friday. Outside these periods the zone uses the 'temperature outside schedule' setting. A period ending at or before its start runs past midnight; use 00:00 as the end for 'until midnight'.",
+              "data": {
+                "periods": "Periods"
+              }
+            },
+            "weekend": {
+              "name": "Weekend schedule",
+              "description": "Saturday and Sunday.",
+              "data": {
+                "same_as_weekdays": "Same as weekdays",
+                "periods": "Periods"
+              },
+              "data_description": {
+                "periods": "Used when 'Same as weekdays' is off."
+              }
+            }
+          }
+        }
+      },
+      "error": {
+        "name_required": "Please enter a name.",
+        "name_in_use": "Another zone already has this name.",
+        "invalid_time": "Enter valid start and end times for every period.",
+        "overlap": "Periods on the same day can't overlap ({overlap})."
+      },
+      "abort": {
+        "reconfigure_successful": "Zone updated."
+      }
+    },
+    "room": {
+      "entry_type": "Room",
+      "initiate_flow": {
+        "user": "Add room"
+      },
+      "step": {
+        "user": {
+          "title": "Add room",
+          "data": {
+            "zone": "Zone",
+            "name": "Name",
+            "trvs": "TRVs",
+            "sensors": "Temperature sensors",
+            "temperature_offset": "Temperature offset"
+          },
+          "data_description": {
+            "trvs": "Radiator valves in this room. They're set automatically. Each TRV can belong to one room only.",
+            "sensors": "Room temperature sensors, placed away from radiators. With three or more, the median is used so one odd sensor can't skew the room. Without any, the room uses its TRVs' temperature.",
+            "temperature_offset": "Run this room warmer (+) or cooler (−) than its zone's schedule. Doesn't apply to boost, away mode or a temperature set on the room itself."
+          },
+          "sections": {
+            "advanced": {
+              "name": "Advanced",
+              "description": "Last seen sensors",
+              "data": {
+                "last_seen": "Last seen sensors"
+              },
+              "data_description": {
+                "last_seen": "Optional. For temperature sensors with a separate timestamp entity (e.g. Zigbee2MQTT last_seen), to spot dead sensors sooner."
+              }
+            }
+          }
+        },
+        "reconfigure": {
+          "title": "Reconfigure room",
+          "data": {
+            "zone": "Zone",
+            "name": "Name",
+            "trvs": "TRVs",
+            "sensors": "Temperature sensors",
+            "temperature_offset": "Temperature offset"
+          },
+          "data_description": {
+            "trvs": "Radiator valves in this room. They're set automatically. Each TRV can belong to one room only.",
+            "sensors": "Room temperature sensors, placed away from radiators. With three or more, the median is used so one odd sensor can't skew the room. Without any, the room uses its TRVs' temperature.",
+            "temperature_offset": "Run this room warmer (+) or cooler (−) than its zone's schedule. Doesn't apply to boost, away mode or a temperature set on the room itself."
+          },
+          "sections": {
+            "advanced": {
+              "name": "Advanced",
+              "description": "Last seen sensors",
+              "data": {
+                "last_seen": "Last seen sensors"
+              },
+              "data_description": {
+                "last_seen": "Optional. For temperature sensors with a separate timestamp entity (e.g. Zigbee2MQTT last_seen), to spot dead sensors sooner."
+              }
+            }
+          }
+        }
+      },
+      "error": {
+        "name_required": "Please enter a name.",
+        "room_empty": "Add at least one TRV or temperature sensor.",
+        "trv_in_use": "Already used by another room: {trv_conflict}. A TRV can only belong to one room.",
+        "zone_missing": "Choose a zone."
+      },
+      "abort": {
+        "reconfigure_successful": "Room updated.",
+        "no_zones": "Add a zone first."
+      }
     }
   },
   "selector": {
@@ -222,11 +333,17 @@
         "last_known": "Use the last reading, however old"
       }
     },
-    "schedule_day": {
-      "options": {
-        "weekday": "Weekdays",
-        "weekend": "Weekends",
-        "__back__": "Back"
+    "schedule_period": {
+      "fields": {
+        "start": "Start",
+        "end": "End",
+        "temperature": "Temperature"
+      }
+    },
+    "last_seen_sensor": {
+      "fields": {
+        "temperature": "Temperature sensor",
+        "last_seen": "Last seen sensor"
       }
     }
   },

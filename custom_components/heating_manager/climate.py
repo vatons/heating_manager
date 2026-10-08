@@ -48,19 +48,26 @@ async def async_setup_entry(
     """Set up climate entities from a config entry."""
     coordinator: HeatingManagerCoordinator = entry.runtime_data
 
-    entities: list[ClimateEntity] = [GlobalClimate(coordinator)]
+    # Each zone and room entity belongs to its subentry, so HA lists it there
+    # and removes it when the subentry is deleted. The global entity belongs
+    # to the entry itself.
+    global_entity = GlobalClimate(coordinator)
+    by_subentry: list[tuple[str | None, ClimateEntity]] = []
     for zone_id, zone_data in coordinator.config.get("zones", {}).items():
         if not isinstance(zone_data, dict):
             continue
-        # Create a climate entity for each room
+        by_subentry.append((zone_data.get("subentry_id"), ZoneClimate(coordinator, zone_id, zone_data)))
         for room_id, room_config in zone_data.get("rooms", {}).items():
-            entities.append(RoomClimate(coordinator, zone_id, room_id, room_config))
+            by_subentry.append(
+                (room_config.get("subentry_id"), RoomClimate(coordinator, zone_id, room_id, room_config))
+            )
 
-        # Create a zone climate entity for heating demand monitoring
-        entities.append(ZoneClimate(coordinator, zone_id, zone_data))
-
-    _async_remove_stale_entities(hass, entry, {e.unique_id for e in entities})
-    async_add_entities(entities)
+    _async_remove_stale_entities(
+        hass, entry, {global_entity.unique_id, *(e.unique_id for _, e in by_subentry)}
+    )
+    async_add_entities([global_entity])
+    for subentry_id, entity in by_subentry:
+        async_add_entities([entity], config_subentry_id=subentry_id)
 
     # Register entity services
     platform = async_get_current_platform()
@@ -93,10 +100,14 @@ def _async_remove_stale_entities(
             ent_reg.async_remove(entity.entity_id)
 
     dev_reg = dr.async_get(hass)
-    zone_ids = set(entry.runtime_data.config.get("zones", {}))
+    zones = entry.runtime_data.config.get("zones", {})
+    keep = {GLOBAL_DEVICE_ID}
+    for zone_id, zone in zones.items():
+        keep.add(_zone_device_id(zone_id))
+        keep.update(_room_device_id(room_id) for room_id in zone.get("rooms", {}))
     for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
         identifiers = {ident for domain, ident in device.identifiers if domain == DOMAIN}
-        if identifiers and not identifiers & ({GLOBAL_DEVICE_ID} | {_zone_device_id(z) for z in zone_ids}):
+        if identifiers and not identifiers & keep:
             dev_reg.async_update_device(device.id, remove_config_entry_id=entry.entry_id)
 
 
@@ -114,6 +125,23 @@ def _zone_device_info(coordinator: HeatingManagerCoordinator, zone_id: str) -> D
         name=zone.get("name", zone_id),
         manufacturer="Heating Manager",
         model="Heating zone",
+    )
+
+
+def _room_device_id(room_id: str) -> str:
+    return f"room_{room_id}"
+
+
+def _room_device_info(coordinator: HeatingManagerCoordinator, zone_id: str, room_id: str) -> DeviceInfo:
+    """Each room is its own device (a device belongs to one subentry), linked to its zone."""
+    zone = coordinator.config.get("zones", {}).get(zone_id, {})
+    room = zone.get("rooms", {}).get(room_id, {})
+    return DeviceInfo(
+        identifiers={(DOMAIN, _room_device_id(room_id))},
+        name=f"{zone.get('name', zone_id)} {room.get('name', room_id)}",
+        manufacturer="Heating Manager",
+        model="Heating room",
+        via_device=(DOMAIN, _zone_device_id(zone_id)),
     )
 
 
@@ -149,11 +177,11 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         self._zone_id = zone_id
         self._room_id = room_id
         self._room_config = room_config
-        # Named after the room, within the zone's device (e.g. "Downstairs Lounge")
+        # The room device's main entity, named like "Downstairs Lounge"
         self._attr_has_entity_name = True
-        self._attr_name = room_config.get("name", room_id)
-        self._attr_unique_id = room_unique_id(zone_id, room_id)
-        self._attr_device_info = _zone_device_info(coordinator, zone_id)
+        self._attr_name = None
+        self._attr_unique_id = room_unique_id(room_id)
+        self._attr_device_info = _room_device_info(coordinator, zone_id, room_id)
 
     @property
     def current_temperature(self) -> float | None:

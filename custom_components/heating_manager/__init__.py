@@ -12,7 +12,12 @@ import os
 import voluptuous as vol
 import yaml
 
-from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry, ConfigEntryState
+from homeassistant.config_entries import (
+    SOURCE_IMPORT,
+    ConfigEntry,
+    ConfigEntryState,
+    ConfigSubentry,
+)
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
@@ -47,7 +52,14 @@ from .const import (
     SERVICE_SET_MODE,
 )
 from .coordinator import HeatingManagerCoordinator
-from .entry_data import legacy_unique_id_map, options_to_runtime, yaml_to_options
+from .entry_data import (
+    SUBENTRY_ROOM,
+    SUBENTRY_ZONE,
+    entry_to_runtime,
+    legacy_unique_id_map,
+    yaml_to_options,
+    zones_to_subentries,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -162,9 +174,41 @@ async def _async_import_yaml(hass: HomeAssistant, conf: dict) -> bool:
     return True
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: HeatingManagerConfigEntry) -> bool:
+    """Migrate old config entries.
+
+    Version 1 (2.x) kept zones and rooms in the entry's options; version 2 (3.0)
+    makes each zone and room a subentry, managed from the integration page.
+    """
+    if entry.version > 2:
+        return False
+    if entry.version == 1:
+        zones = dict(entry.options.get("zones") or {})
+        for data in zones_to_subentries(zones):
+            hass.config_entries.async_add_subentry(entry, ConfigSubentry(**data))
+        hass.config_entries.async_update_entry(
+            entry, options={"settings": dict(entry.options.get("settings") or {})}, version=2
+        )
+        _LOGGER.info("Migrated Heating Manager: %d zone(s) and their rooms are now subentries", len(zones))
+    return True
+
+
+@callback
+def _async_remove_orphan_rooms(hass: HomeAssistant, entry: HeatingManagerConfigEntry) -> None:
+    """Delete rooms whose zone was deleted (HA deletes subentries one at a time)."""
+    zone_ids = {
+        sub.data.get("zone_id") for sub in entry.subentries.values() if sub.subentry_type == SUBENTRY_ZONE
+    }
+    for sub in list(entry.subentries.values()):
+        if sub.subentry_type == SUBENTRY_ROOM and sub.data.get("zone_id") not in zone_ids:
+            _LOGGER.info("Removing room %s: its zone was deleted", sub.title)
+            hass.config_entries.async_remove_subentry(entry, sub.subentry_id)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: HeatingManagerConfigEntry) -> bool:
     """Set up Heating Manager from a config entry."""
-    config, settings = options_to_runtime(dict(entry.options))
+    _async_remove_orphan_rooms(hass, entry)
+    config, settings = entry_to_runtime(entry)
     _async_migrate_unique_ids(hass, config)
 
     coordinator = HeatingManagerCoordinator(
@@ -199,7 +243,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HeatingManagerConfigEntr
 
 @callback
 def _async_migrate_unique_ids(hass: HomeAssistant, config: dict) -> None:
-    """Move entities from pre-2.2 unique ids to the current ones, keeping their entity ids.
+    """Move entities from older unique ids to the current ones, keeping their entity ids.
 
     Includes entities first created by the old YAML platform (no config entry).
     """

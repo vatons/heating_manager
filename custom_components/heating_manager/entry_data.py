@@ -216,6 +216,24 @@ def sort_periods(periods: list[dict]) -> list[dict]:
     return sorted(periods, key=lambda p: parse_time(p.get(CONF_START)) or 0)
 
 
+def first_overlap(periods: list[dict]) -> str | None:
+    """"HH:MM–HH:MM and HH:MM–HH:MM" for the first two periods that overlap, else None."""
+    for i, first in enumerate(periods):
+        for second in periods[i + 1:]:
+            if period_minutes(first) & period_minutes(second):
+                return f"{first[CONF_START]}–{first[CONF_END]} and {second[CONF_START]}–{second[CONF_END]}"
+    return None
+
+
+def schedule_overlaps(zone_name: str, schedule: dict) -> list[str]:
+    """Describe overlapping periods in a zone's schedule, one line per day type."""
+    problems = []
+    for day, label in ((CONF_WEEKDAY, "weekdays"), (CONF_WEEKEND, "weekends")):
+        if overlap := first_overlap((schedule or {}).get(day) or []):
+            problems.append(f"{zone_name} {label}: {overlap}")
+    return problems
+
+
 def format_period(period: dict) -> str:
     return f"{period[CONF_START]}–{period[CONF_END]}: {period[CONF_TEMPERATURE]:g}°C"
 
@@ -273,9 +291,8 @@ def dedupe_trvs(zones: dict) -> list[str]:
 # ---------------------------------------------------------------------------
 # Entity unique ids
 # ---------------------------------------------------------------------------
-# Prefixed and ':'-separated so zone and room ids can't run together: the old
-# "{domain}_{zone}_{room}" form made zone "up"/room "stairs_bed" and zone
-# "up_stairs"/room "bed" the same id, so one room's entity was dropped.
+# Prefixed and ':'-separated so ids can't run together. Room ids are unique
+# across all zones, so a room keeps its entity when it moves to another zone.
 
 GLOBAL_UNIQUE_ID = "heating_manager:global"
 
@@ -284,25 +301,155 @@ def zone_unique_id(zone_id: str) -> str:
     return f"heating_manager:zone:{zone_id}"
 
 
-def room_unique_id(zone_id: str, room_id: str) -> str:
-    return f"heating_manager:room:{zone_id}:{room_id}"
+def room_unique_id(room_id: str) -> str:
+    return f"heating_manager:room:{room_id}"
 
 
 def legacy_unique_id_map(zones: dict) -> dict[str, str]:
-    """Map pre-2.2 unique ids to current ones.
+    """Map older unique ids to current ones, from runtime zones (entry_to_runtime).
 
-    Where two old ids collided, the first in config order wins; that is the
-    entity that was actually created (entities were added in config order).
+    Covers 2.0/2.1 ("heating_manager_{zone}_{room}", which could collide; the
+    first room in config order wins, as that's the entity that was created)
+    and 2.2 ("heating_manager:room:{zone}:{room}").
     """
     mapping = {"heating_manager_global": GLOBAL_UNIQUE_ID}
     for zone_id, zone in zones.items():
-        if not isinstance(zone, dict):
-            continue
-        rooms = zone.get(CONF_ROOMS)
-        for room_id in (rooms if isinstance(rooms, dict) else {}):
-            mapping.setdefault(f"heating_manager_{zone_id}_{room_id}", room_unique_id(zone_id, room_id))
+        for room_id, room in (zone.get(CONF_ROOMS) or {}).items():
+            old_room_id = room.get("previous_room_id") or room_id
+            old_zone_id = room.get("previous_zone_id") or zone_id
+            mapping.setdefault(f"heating_manager_{old_zone_id}_{old_room_id}", room_unique_id(room_id))
+            mapping.setdefault(f"heating_manager:room:{old_zone_id}:{old_room_id}", room_unique_id(room_id))
         mapping.setdefault(f"heating_manager_{zone_id}_zone", zone_unique_id(zone_id))
     return mapping
+
+
+# ---------------------------------------------------------------------------
+# Subentries: one per zone and one per room
+# ---------------------------------------------------------------------------
+
+SUBENTRY_ZONE = "zone"
+SUBENTRY_ROOM = "room"
+CONF_ZONE_ID = "zone_id"
+CONF_ROOM_ID = "room_id"
+CONF_WEEKEND_SAME = "weekend_same_as_weekday"
+
+
+def room_title(room_name: str, zone_name: str) -> str:
+    return f"{room_name} ({zone_name})"
+
+
+def zone_subentry(zone_id: str, zone: dict) -> dict[str, Any]:
+    """ConfigSubentryData for a zone (from the options/YAML zone structure)."""
+    schedule = zone.get(CONF_SCHEDULE) or {}
+    weekday = list(schedule.get(CONF_WEEKDAY) or [])
+    weekend = list(schedule.get(CONF_WEEKEND) or [])
+    data: dict[str, Any] = {
+        CONF_ZONE_ID: zone_id,
+        "name": zone.get("name", zone_id),
+        CONF_SCHEDULE: {CONF_WEEKDAY: weekday, CONF_WEEKEND: weekend},
+        CONF_WEEKEND_SAME: weekday == weekend,
+    }
+    if zone.get(CONF_HEATING_DEMAND_MODE) in HEATING_DEMAND_MODES:
+        data[CONF_HEATING_DEMAND_MODE] = zone[CONF_HEATING_DEMAND_MODE]
+    if zone.get(CONF_MONITORING_ONLY):
+        data[CONF_MONITORING_ONLY] = True
+    return {"subentry_type": SUBENTRY_ZONE, "title": data["name"], "unique_id": zone_id, "data": data}
+
+
+def room_subentry(room_id: str, room: dict, zone_id: str, zone_name: str, **extra) -> dict[str, Any]:
+    """ConfigSubentryData for a room."""
+    data: dict[str, Any] = {
+        CONF_ROOM_ID: room_id,
+        CONF_ZONE_ID: zone_id,
+        "name": room.get("name", room_id),
+        CONF_TRVS: list(room.get(CONF_TRVS) or []),
+        CONF_SENSORS: [dict(s) for s in room.get(CONF_SENSORS) or []],
+        **{k: v for k, v in extra.items() if v},
+    }
+    if room.get(CONF_TEMPERATURE_OFFSET):
+        data[CONF_TEMPERATURE_OFFSET] = float(room[CONF_TEMPERATURE_OFFSET])
+    return {
+        "subentry_type": SUBENTRY_ROOM,
+        "title": room_title(data["name"], zone_name),
+        "unique_id": room_id,
+        "data": data,
+    }
+
+
+def zones_to_subentries(zones: dict, taken_room_ids: set[str] | None = None) -> list[dict[str, Any]]:
+    """Convert the options/YAML zones structure to subentry data.
+
+    Room ids must be unique across zones; a clash (e.g. "bathroom" in two
+    zones) gets a zone-prefixed id, remembering the old one so its entity
+    keeps its entity id. TRVs listed in more than one room stay in the first.
+    """
+    zones = copy.deepcopy(zones)
+    for problem in dedupe_trvs(zones):
+        _LOGGER.warning("TRV listed in more than one room: %s", problem)
+    taken = set(taken_room_ids or ())
+    result = []
+    for zone_id, zone in zones.items():
+        if not isinstance(zone, dict):
+            continue
+        result.append(zone_subentry(zone_id, zone))
+        for room_id, room in (zone.get(CONF_ROOMS) or {}).items():
+            new_id = room_id
+            if new_id in taken:
+                new_id = unique_id_for(f"{zone_id}_{room_id}", taken, "room")
+            taken.add(new_id)
+            result.append(room_subentry(
+                new_id, room, zone_id, zone.get("name", zone_id),
+                previous_room_id=room_id if new_id != room_id else None,
+                previous_zone_id=zone_id,
+            ))
+    return result
+
+
+def entry_to_runtime(entry: Any) -> tuple[dict, dict]:
+    """Return (config, settings) for the coordinator from a config entry.
+
+    config has the structure the coordinator and climate platform read:
+    {"zones": {zone_id: {..., "rooms": {room_id: {...}}}}, "heating_demand_mode": ...}.
+    Each zone and room also carries its "subentry_id".
+    """
+    settings = default_settings()
+    for key, value in (entry.options.get(OPT_SETTINGS) or {}).items():
+        if key in SETTINGS_BY_KEY:
+            settings[key] = coerce_setting(SETTINGS_BY_KEY[key], value)
+
+    zones: dict[str, dict] = {}
+    subentries = list(entry.subentries.values())
+    for sub in subentries:
+        if sub.subentry_type != SUBENTRY_ZONE:
+            continue
+        data = dict(sub.data)
+        schedule = copy.deepcopy(dict(data.get(CONF_SCHEDULE) or {}))
+        if data.get(CONF_WEEKEND_SAME):
+            schedule[CONF_WEEKEND] = copy.deepcopy(schedule.get(CONF_WEEKDAY, []))
+        zone = {
+            "name": data.get("name", sub.title),
+            CONF_SCHEDULE: schedule,
+            CONF_ROOMS: {},
+            "subentry_id": sub.subentry_id,
+        }
+        for key in (CONF_HEATING_DEMAND_MODE, CONF_MONITORING_ONLY):
+            if data.get(key):
+                zone[key] = data[key]
+        zones[data[CONF_ZONE_ID]] = zone
+    for sub in subentries:
+        if sub.subentry_type != SUBENTRY_ROOM:
+            continue
+        data = copy.deepcopy(dict(sub.data))
+        zone = zones.get(data.get(CONF_ZONE_ID))
+        if zone is None:
+            continue
+        room_id = data.pop(CONF_ROOM_ID)
+        data.pop(CONF_ZONE_ID, None)
+        data["subentry_id"] = sub.subentry_id
+        zone[CONF_ROOMS][room_id] = data
+    for problem in dedupe_trvs(zones):
+        _LOGGER.warning("TRV assigned to more than one room: %s", problem)
+    return {CONF_ZONES: zones, CONF_HEATING_DEMAND_MODE: settings[CONF_HEATING_DEMAND_MODE]}, settings
 
 
 # ---------------------------------------------------------------------------
@@ -400,28 +547,12 @@ def yaml_to_options(heating_config: dict, conf: dict | None = None) -> dict[str,
 
     for problem in dedupe_trvs(zones):
         _LOGGER.warning("Importing: TRV listed in more than one room: %s", problem)
+    for zone in zones.values():
+        for problem in schedule_overlaps(zone["name"], zone[CONF_SCHEDULE]):
+            _LOGGER.warning("Importing: schedule periods overlap (%s); fix them in the zone's settings", problem)
     return {OPT_SETTINGS: settings, OPT_ZONES: zones}
 
 
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
-
-def options_to_runtime(options: dict) -> tuple[dict, dict]:
-    """Return (config, settings) for the coordinator from entry options.
-
-    config has the structure the coordinator and climate platform read:
-    {"zones": {...}, "heating_demand_mode": ...}.
-    """
-    settings = default_settings()
-    for key, value in (options.get(OPT_SETTINGS) or {}).items():
-        if key in SETTINGS_BY_KEY:
-            settings[key] = coerce_setting(SETTINGS_BY_KEY[key], value)
-    zones = copy.deepcopy(dict(options.get(OPT_ZONES) or {}))
-    for problem in dedupe_trvs(zones):
-        _LOGGER.warning("TRV assigned to more than one room: %s", problem)
-    config = {
-        CONF_ZONES: zones,
-        CONF_HEATING_DEMAND_MODE: settings[CONF_HEATING_DEMAND_MODE],
-    }
-    return config, settings

@@ -6,6 +6,7 @@ from datetime import timedelta
 
 import pytest
 
+from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
@@ -15,13 +16,15 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.heating_manager.const import DOMAIN
 from custom_components.heating_manager.entry_data import (
     dedupe_trvs,
+    entry_to_runtime,
     new_options,
-    options_to_runtime,
+    room_subentry,
     yaml_to_options,
+    zone_subentry,
 )
 
-from .conftest import FakeTRV, local_dt, set_temp
-from .test_config_flow import form, menu, open_options, save
+from .conftest import FakeTRV, entry_from_options, local_dt, set_temp
+from .test_config_flow import form, menu, open_options, room_input, start_subentry, submit
 
 
 def options_with_rooms(rooms: dict, schedule_temp: float = 19.0) -> dict:
@@ -49,7 +52,7 @@ async def setup_entry(hass, freezer):
     entries = []
 
     async def _setup(options):
-        entry = MockConfigEntry(domain=DOMAIN, title="Heating Manager", data={}, options=options)
+        entry = options if isinstance(options, MockConfigEntry) else entry_from_options(options)
         entry.add_to_hass(hass)
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
@@ -73,17 +76,28 @@ async def test_shared_trv_controlled_by_first_room_only(hass, add_trvs, setup_en
     trv = (await add_trvs(FakeTRV("shared_trv", current_temperature=17.0)))["climate.shared_trv"]
     set_temp(hass, "sensor.a", 15.0)
     set_temp(hass, "sensor.b", 22.0)
-    entry = await setup_entry(options_with_rooms({
-        "a": room("A", ["climate.shared_trv"], ["sensor.a"]),
-        "b": room("B", ["climate.shared_trv"], ["sensor.b"]),
-    }))
+    # Stored with the TRV in both rooms (e.g. edited by hand); setup must not let both control it
+    entry = await setup_entry(shared_trv_entry())
     for _ in range(3):
         await entry.runtime_data.async_refresh()
     # Only room A (cold) commands it: no more flipping between two setpoints
     assert all(sp > 17.0 for sp in trv.set_temperature_calls)
     assert room_data(entry, "b")["trvs"] == []
     assert "climate.shared_trv is already in Home / A" in caplog.text
-    assert entry.options["zones"]["home"]["rooms"]["b"]["trvs"] == ["climate.shared_trv"]   # options untouched
+    stored = [sub for sub in entry.subentries.values() if sub.data.get("room_id") == "b"][0]
+    assert stored.data["trvs"] == ["climate.shared_trv"]                 # stored config untouched
+
+
+def shared_trv_entry() -> MockConfigEntry:
+    zone = options_with_rooms({})["zones"]["home"]
+    return MockConfigEntry(
+        domain=DOMAIN, title="Heating Manager", data={}, version=2, options={"settings": {}},
+        subentries_data=[
+            zone_subentry("home", zone),
+            room_subentry("a", room("A", ["climate.shared_trv"], ["sensor.a"]), "home", "Home"),
+            room_subentry("b", room("B", ["climate.shared_trv"], ["sensor.b"]), "home", "Home"),
+        ],
+    )
 
 
 def test_dedupe_trvs_across_zones():
@@ -103,31 +117,30 @@ def test_yaml_import_dedupes_trvs():
     assert options["zones"]["z"]["rooms"]["b"]["trvs"] == ["climate.y"]
 
 
-def test_options_to_runtime_does_not_modify_options():
-    options = options_with_rooms({"a": room("A", ["climate.x"]), "b": room("B", ["climate.x"])})
-    config, _ = options_to_runtime(options)
+def test_entry_to_runtime_does_not_modify_subentries():
+    entry = shared_trv_entry()
+    config, _ = entry_to_runtime(entry)
     assert config["zones"]["home"]["rooms"]["b"]["trvs"] == []
-    assert options["zones"]["home"]["rooms"]["b"]["trvs"] == ["climate.x"]
+    stored = [sub for sub in entry.subentries.values() if sub.data.get("room_id") == "b"][0]
+    assert stored.data["trvs"] == ["climate.shared_trv"]
+
+
+def test_converting_options_to_subentries_dedupes_trvs():
+    entry = entry_from_options(options_with_rooms({"a": room("A", ["climate.x"]), "b": room("B", ["climate.x"])}))
+    rooms = {sub.data["room_id"]: sub for sub in entry.subentries.values() if sub.subentry_type == "room"}
+    assert rooms["a"].data["trvs"] == ["climate.x"]
+    assert rooms["b"].data["trvs"] == []
 
 
 async def test_room_form_rejects_trv_used_by_another_room(hass, add_trvs, setup_entry):
     await add_trvs(FakeTRV("lounge_trv"), FakeTRV("spare_trv"))
     entry = await setup_entry(options_with_rooms({"lounge": room("Lounge", ["climate.lounge_trv"])}))
-    flow_id = await open_options(hass, entry)
-    await menu(hass, flow_id, "zones")
-    await form(hass, flow_id, {"zone": "home"})
-    await menu(hass, flow_id, "rooms")
-    await form(hass, flow_id, {"room": "__add__"})
-    result = await form(hass, flow_id, {"name": "Study", "trvs": ["climate.lounge_trv", "climate.spare_trv"]})
+    result = await start_subentry(hass, entry, "room")
+    result = await submit(hass, result, room_input(zone="home", name="Study", trvs=["climate.lounge_trv", "climate.spare_trv"]))
     assert result["errors"] == {"trvs": "trv_in_use"}
-    assert result["description_placeholders"]["trv_conflict"] == "climate.lounge_trv (Home / Lounge)"
-    result = await form(hass, flow_id, {"name": "Study", "trvs": ["climate.spare_trv"]})
-    assert result["step_id"] == "rooms"
-    # Editing the room that already has the TRV is fine
-    result = await form(hass, flow_id, {"room": "lounge"})
-    result = await form(hass, flow_id, {"name": "Lounge", "trvs": ["climate.lounge_trv"]})
-    assert result["step_id"] == "rooms"
-    hass.config_entries.options.async_abort(flow_id)
+    assert result["description_placeholders"]["trv_conflict"] == "climate.lounge_trv (Lounge (Home))"
+    result = await submit(hass, result, room_input(zone="home", name="Study", trvs=["climate.spare_trv"]))
+    assert result["type"] is FlowResultType.CREATE_ENTRY
 
 
 async def test_import_confirm_warns_about_shared_trvs(hass, add_trvs, setup_entry):
