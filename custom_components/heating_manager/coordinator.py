@@ -60,6 +60,37 @@ class _HeatingManagerStore(Store):
         )
 
 
+class DemandHold:
+    """Minimum on/off time for a heat demand signal, to stop the boiler short-cycling.
+
+    Once demand switches on it stays on for at least min_on; once off, it stays
+    off for at least min_off. The first reading after startup isn't held off.
+    """
+
+    def __init__(self) -> None:
+        self.state: bool | None = None
+        self.changed_at: datetime | None = None
+
+    def apply(
+        self, requested: bool, now: datetime, min_on: timedelta, min_off: timedelta
+    ) -> tuple[bool, str | None]:
+        """Return (demand to use, "min_on"/"min_off" if being held, else None)."""
+        if self.state is None:
+            self.state = requested
+            self.changed_at = now if requested else None
+            return requested, None
+        if requested != self.state and self.changed_at is not None:
+            held_for = now - self.changed_at
+            if self.state and held_for < min_on:
+                return True, "min_on"
+            if not self.state and held_for < min_off:
+                return False, "min_off"
+        if requested != self.state:
+            self.state = requested
+            self.changed_at = now
+        return self.state, None
+
+
 class HeatingManagerCoordinator(DataUpdateCoordinator):
     """Coordinator to manage heating logic and state."""
 
@@ -82,6 +113,8 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         analytics_history_size: int,
         analytics_min_samples: int,
         derivative_smoothing: float,
+        min_boiler_on_time: int = 0,
+        min_boiler_off_time: int = 0,
         config_entry: ConfigEntry | None = None,
     ) -> None:
         """Initialize the coordinator."""
@@ -110,6 +143,13 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         self._zone_heating_start: dict[str, Any] = {}  # zone_id -> datetime when demand started
         self.rooms_off: dict[str, list[str]] = {}  # zone_id -> room_ids switched off by the user
         self._missing_since: dict[str, datetime] = {}  # entity_id -> first seen missing (UTC)
+        # Boiler protection: minimum on/off times for zone and global heat demand
+        self.min_boiler_on_time = timedelta(minutes=min_boiler_on_time)
+        self.min_boiler_off_time = timedelta(minutes=min_boiler_off_time)
+        self._zone_demand_holds: dict[str, DemandHold] = {}
+        self._global_demand_hold = DemandHold()
+        self.global_heating_demand = False
+        self.global_demand_hold: str | None = None
         self._missing_issue_active = False
 
         # Initialize manager components
@@ -342,9 +382,17 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 )
                 if zone_data["monitoring_only"]:
                     zone_data["heating_demand"] = False
+                    zone_data["heating_demand_requested"] = False
+                    zone_data["demand_hold"] = None
                 else:
-                    zone_data["heating_demand"] = self.heating_logic.calculate_zone_heating_demand(
+                    requested = self.heating_logic.calculate_zone_heating_demand(
                         zone_data["rooms"], zone_demand_mode, zone_id=zone_id
+                    )
+                    hold = self._zone_demand_holds.setdefault(zone_id, DemandHold())
+                    zone_data["heating_demand_requested"] = requested
+                    zone_data["heating_demand"], zone_data["demand_hold"] = hold.apply(
+                        requested, dt_util.utcnow(),
+                        self.min_boiler_on_time, self.min_boiler_off_time,
                     )
                 zone_data["heating_demand_mode"] = zone_demand_mode
                 zone_data["manual_zone_override"] = {
@@ -417,6 +465,15 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 self.manual_zone_temp.pop(zone_id, None)
 
             self._async_check_missing_entities(zones)
+
+            # Global demand (any zone), with the same minimum on/off times, so zones
+            # taking turns can't short-cycle a boiler shared between them
+            self.global_heating_demand, self.global_demand_hold = self._global_demand_hold.apply(
+                any(zone.get("heating_demand") for zone in result.values()),
+                dt_util.utcnow(),
+                self.min_boiler_on_time,
+                self.min_boiler_off_time,
+            )
 
             if _state_changed:
                 await self._save_state()

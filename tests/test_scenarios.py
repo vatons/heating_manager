@@ -623,3 +623,126 @@ async def test_zone_average_fires_when_average_drops(hass, zone):
     await tick(10)
     assert demand_of(coordinator) is True                  # average 19.3°C
     assert margin_of(trvs["climate.bedroom_trv"]) >= OPEN_MARGIN
+
+
+# ---------------------------------------------------------------------------
+# Boiler protection: minimum on/off times
+# ---------------------------------------------------------------------------
+
+def test_demand_hold_unit():
+    from datetime import datetime, timezone
+
+    from custom_components.heating_manager.coordinator import DemandHold
+
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    m = lambda n: t0 + timedelta(minutes=n)   # noqa: E731
+    five = timedelta(minutes=5)
+    hold = DemandHold()
+    assert hold.apply(False, m(0), five, five) == (False, None)   # startup isn't held off
+    assert hold.apply(True, m(1), five, five) == (True, None)
+    assert hold.apply(False, m(3), five, five) == (True, "min_on")
+    assert hold.apply(False, m(6), five, five) == (False, None)
+    assert hold.apply(True, m(8), five, five) == (False, "min_off")
+    assert hold.apply(True, m(11), five, five) == (True, None)
+    # Disabled: follows immediately
+    zero = timedelta(0)
+    hold = DemandHold()
+    assert [hold.apply(v, m(i), zero, zero)[0] for i, v in enumerate([True, False, True])] == [True, False, True]
+    # Starting with demand on holds it on from then
+    hold = DemandHold()
+    assert hold.apply(True, m(0), five, five) == (True, None)
+    assert hold.apply(False, m(2), five, five) == (True, "min_on")
+
+
+async def test_min_on_and_off_times_hold_zone_demand(hass, zone):
+    coordinator, trvs, set_room, tick = await zone(
+        {"lounge": (True, 19.5)}, min_boiler_on_time=5, min_boiler_off_time=5,
+    )
+    zone_data = lambda: coordinator.data["zone_1"]   # noqa: E731
+    assert zone_data()["heating_demand"] is True
+
+    # Room reaches target after 2 minutes: demand is held on until 5 minutes
+    set_room("lounge", 20.2)
+    await tick(2)
+    assert zone_data()["heating_demand_requested"] is False
+    assert zone_data()["heating_demand"] is True
+    assert zone_data()["demand_hold"] == "min_on"
+    await tick(2)
+    assert zone_data()["heating_demand"] is True
+    await tick(1)
+    assert (zone_data()["heating_demand"], zone_data()["demand_hold"]) == (False, None)
+
+    # Room cools again 2 minutes later: held off until 5 minutes after it stopped
+    set_room("lounge", 19.5)
+    await tick(2)
+    assert zone_data()["heating_demand_requested"] is True
+    assert (zone_data()["heating_demand"], zone_data()["demand_hold"]) == (False, "min_off")
+    await tick(3)
+    assert (zone_data()["heating_demand"], zone_data()["demand_hold"]) == (True, None)
+
+
+async def test_no_minimums_by_default(hass, zone):
+    coordinator, trvs, set_room, tick = await zone({"lounge": (True, 19.5)})
+    set_room("lounge", 20.2)
+    await tick(2)
+    assert coordinator.data["zone_1"]["heating_demand"] is False
+    set_room("lounge", 19.5)
+    await tick(2)
+    assert coordinator.data["zone_1"]["heating_demand"] is True
+
+
+async def test_trvs_not_affected_by_demand_hold(hass, zone):
+    """Holding the boiler on doesn't hold TRVs open: a warm room's TRV still closes."""
+    coordinator, trvs, set_room, tick = await zone(
+        {"lounge": (True, 19.5)}, min_boiler_on_time=10,
+    )
+    set_room("lounge", 21.0)
+    await tick(3)
+    assert coordinator.data["zone_1"]["heating_demand"] is True
+    assert margin_of(trvs["climate.lounge_trv"]) < 0
+
+
+async def test_global_demand_held_across_zones_taking_turns(hass, add_trvs, make_coordinator, freezer):
+    """Zone A stops, zone B starts a minute later: without a hold the boiler would blip off."""
+    freezer.move_to(local_dt(hour=12))
+    await add_trvs(FakeTRV("a_trv"), FakeTRV("b_trv"))
+    zones = {
+        zid: {"schedule": ALL_DAY_20, "rooms": {zid: make_room(zid, [f"climate.{zid}_trv"], [f"sensor.{zid}"])}}
+        for zid in ("a", "b")
+    }
+
+    async def run(**minimums):
+        coordinator = make_coordinator(make_config(zones), **minimums)
+        set_temp(hass, "sensor.a", 19.5)
+        set_temp(hass, "sensor.b", 20.0)
+        await coordinator.async_refresh()
+        assert coordinator.global_heating_demand is True
+        freezer.tick(timedelta(minutes=3))
+        set_temp(hass, "sensor.a", 20.2)                      # A satisfied
+        set_temp(hass, "sensor.b", 20.01)
+        await coordinator.async_refresh()
+        first_gap = coordinator.global_heating_demand
+        freezer.tick(timedelta(minutes=1))
+        set_temp(hass, "sensor.a", 20.21)
+        set_temp(hass, "sensor.b", 19.6)                      # B cools: starts calling
+        await coordinator.async_refresh()
+        return first_gap, coordinator.global_heating_demand, coordinator
+
+    gap, after, _ = await run()
+    assert (gap, after) == (False, True)                       # boiler blipped off for a minute
+    gap, after, coordinator = await run(min_boiler_on_time=5)
+    assert (gap, after) == (True, True)                         # held on through the gap
+    assert coordinator.global_demand_hold is None
+
+
+async def test_monitoring_zone_never_held_on(hass, add_trvs, make_coordinator, freezer):
+    freezer.move_to(local_dt(hour=12))
+    await add_trvs(FakeTRV("a_trv"))
+    set_temp(hass, "sensor.a", 15.0)
+    coordinator = make_coordinator(make_config({"a": {
+        "schedule": ALL_DAY_20, "monitoring_only": True,
+        "rooms": {"a": make_room("a", ["climate.a_trv"], ["sensor.a"])},
+    }}), min_boiler_on_time=10)
+    await coordinator.async_refresh()
+    assert coordinator.data["a"]["heating_demand"] is False
+    assert coordinator.global_heating_demand is False

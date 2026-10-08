@@ -840,3 +840,20 @@ async def test_collided_legacy_id_migrates_to_first_room(hass, env):
     await hass.async_block_till_done()
     assert ent_reg.async_get("climate.kept").unique_id == room_unique_id("up", "stairs_bed")
     assert ent_reg.async_get_entity_id("climate", DOMAIN, room_unique_id("up_stairs", "bed"))
+
+
+async def test_boiler_minimum_times_in_advanced_settings(hass, entry):
+    flow_id = await open_options(hass, entry)
+    result = await menu(hass, flow_id, "advanced")
+    keys = {str(k) for k in result["data_schema"].schema}
+    assert {"min_boiler_on_time", "min_boiler_off_time"} <= keys
+    values = {k: v for k, v in default_settings().items() if k in keys}
+    assert values["min_boiler_on_time"] == 0 and values["min_boiler_off_time"] == 0
+    await form(hass, flow_id, {**values, "min_boiler_on_time": 5, "min_boiler_off_time": 3})
+    await save(hass, flow_id)
+    coordinator = entry.runtime_data
+    assert coordinator.min_boiler_on_time.total_seconds() == 300
+    assert coordinator.min_boiler_off_time.total_seconds() == 180
+    zone = hass.states.get("climate.downstairs")
+    assert "demand_hold" in zone.attributes and "heating_demand_requested" in zone.attributes
+    assert "demand_hold" in hass.states.get("climate.heating_manager").attributes

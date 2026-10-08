@@ -239,6 +239,12 @@ The zone climate entity attributes include:
 - `schedule.current_period` - Current schedule period (`start`, `end`, `temperature`)
 - `schedule.next_period` - Next schedule period
 
+#### Boiler protection (minimum on/off times)
+
+To stop the boiler short-cycling, set **Minimum boiler on time** and **Minimum boiler off time** in **Configure → Advanced settings** (minutes, 0 = off, the default). Once a zone starts calling for heat it keeps calling for at least the on time; once it stops, it waits at least the off time before calling again. The global entity is held the same way, so zones taking turns can't cycle a shared boiler. TRVs aren't held: a room that's warm enough still closes its TRV.
+
+The zone entity shows `heating_demand_requested` (what the rooms want now) next to `heating_demand` (what's being signalled), and `demand_hold` (`min_on`, `min_off` or null) explains any difference. The global entity has `demand_hold` too.
+
 #### Monitoring-only zones
 
 A zone can be set to **monitoring only** (**Configure → Zones, rooms and schedules → (zone) → Name, demand mode and monitoring**). Use this for rooms you want to see but not heat, such as a bathroom or cloakroom with sensors but no controllable radiators. A monitoring-only zone:

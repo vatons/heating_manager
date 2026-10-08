@@ -571,6 +571,8 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
 
             # Heating status
             "heating_demand": zone_data.get("heating_demand", False),
+            "heating_demand_requested": zone_data.get("heating_demand_requested", False),
+            "demand_hold": zone_data.get("demand_hold"),
             "heating_demand_mode": zone_data.get("heating_demand_mode", "any_room"),
             "monitoring_only": zone_data.get("monitoring_only", False),
             "away_mode": self.coordinator.away_mode,
@@ -749,10 +751,9 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
         if not self.coordinator.data:
             return HVACAction.IDLE
 
-        # OR logic: if any zone has heating demand, return HEATING
-        for zone_data in self.coordinator.data.values():
-            if zone_data.get("heating_demand", False):
-                return HVACAction.HEATING
+        # Any zone demanding heat, after the minimum boiler on/off times
+        if self.coordinator.global_heating_demand:
+            return HVACAction.HEATING
 
         return HVACAction.IDLE
 
@@ -809,6 +810,7 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
             # System status
             "away_mode": self.coordinator.away_mode,
             "total_zones": len(self.coordinator.data),
+            "demand_hold": self.coordinator.global_demand_hold,
             "zones_demanding_heat": len(zones_needing_heat),
 
             # Heating demand

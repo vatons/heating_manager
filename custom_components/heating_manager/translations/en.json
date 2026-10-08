@@ -62,7 +62,9 @@
           "analytics_enabled": "Heating analytics",
           "analytics_history_size": "Analytics history size",
           "analytics_min_samples": "Analytics minimum samples",
-          "derivative_smoothing_factor": "Analytics smoothing"
+          "derivative_smoothing_factor": "Analytics smoothing",
+          "min_boiler_on_time": "Minimum boiler on time",
+          "min_boiler_off_time": "Minimum boiler off time"
         },
         "data_description": {
           "update_interval": "How often rooms are checked and TRVs updated.",
@@ -74,7 +76,9 @@
           "analytics_enabled": "Track heating and cooling rates and estimate time to reach target.",
           "analytics_history_size": "Readings kept per room for analytics.",
           "analytics_min_samples": "Readings needed before rates are estimated.",
-          "derivative_smoothing_factor": "Smoothing applied to heating/cooling rates (higher = more responsive)."
+          "derivative_smoothing_factor": "Smoothing applied to heating/cooling rates (higher = more responsive).",
+          "min_boiler_on_time": "Once a zone (and the global entity) starts calling for heat, keep calling for at least this long. Protects the boiler from short-cycling. 0 = off.",
+          "min_boiler_off_time": "Once heat demand stops, wait at least this long before calling for heat again. 0 = off."
         }
       },
       "zones": {
