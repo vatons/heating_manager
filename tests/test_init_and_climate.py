@@ -262,14 +262,12 @@ async def test_room_off_sets_trvs_to_minimum(hass, setup_hm):
     await hass.services.async_call(
         CLIMATE_DOMAIN, SERVICE_SET_HVAC_MODE, {ATTR_ENTITY_ID: ROOM, "hvac_mode": "off"}, blocking=True
     )
+    await refresh(hass)
     assert hass.states.get(ROOM).state == HVACMode.OFF
-    assert "climate.lounge_trv" in trvs
+    assert hass.states.get(ROOM).attributes[ATTR_HVAC_ACTION] == "off"
+    assert trvs["climate.lounge_trv"].target_temperature == 10
 
 
-@pytest.mark.xfail(
-    reason="BUG: room hvac_mode OFF is ignored by the coordinator; the next update "
-    "re-opens the TRVs"
-)
 async def test_room_off_keeps_trvs_closed(hass, setup_hm):
     _, trvs = await setup_hm()
     await call(hass, SERVICE_SET_HVAC_MODE, {ATTR_ENTITY_ID: ROOM, "hvac_mode": "off"})
@@ -339,3 +337,20 @@ async def test_room_with_offset_set_below_its_target_creates_override(hass, setu
     state = hass.states.get(ROOM)
     assert state.attributes[ATTR_TEMPERATURE] == 17.0
     assert state.attributes["manual_override"]["active"] is True
+
+
+async def test_room_back_on_resumes_heating(hass, setup_hm):
+    _, trvs = await setup_hm()
+    await call(hass, SERVICE_SET_HVAC_MODE, {ATTR_ENTITY_ID: ROOM, "hvac_mode": "off"})
+    await call(hass, SERVICE_SET_HVAC_MODE, {ATTR_ENTITY_ID: ROOM, "hvac_mode": "heat"})
+    assert hass.states.get(ROOM).state == HVACMode.HEAT
+    assert trvs["climate.lounge_trv"].valve_open
+    assert hass.states.get(ZONE).attributes[ATTR_HVAC_ACTION] == "heating"
+
+
+async def test_boost_switches_off_room_back_on(hass, setup_hm):
+    _, trvs = await setup_hm()
+    await call(hass, SERVICE_SET_HVAC_MODE, {ATTR_ENTITY_ID: ROOM, "hvac_mode": "off"})
+    await call(hass, "set_boost", {ATTR_ENTITY_ID: ROOM, "temperature": 22}, domain=DOMAIN)
+    assert hass.states.get(ROOM).state == HVACMode.HEAT
+    assert trvs["climate.lounge_trv"].valve_open

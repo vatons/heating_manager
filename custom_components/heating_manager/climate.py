@@ -109,7 +109,6 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         self._room_config = room_config
         self._attr_name = f"{room_config.get('name', room_id)} (HM)"
         self._attr_unique_id = f"{DOMAIN}_{zone_id}_{room_id}"
-        self._hvac_mode = HVACMode.HEAT
 
     @property
     def current_temperature(self) -> float | None:
@@ -138,12 +137,14 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
     @property
     def hvac_mode(self) -> HVACMode:
         """Return the current HVAC mode."""
-        return self._hvac_mode
+        if self.coordinator.is_room_off(self._zone_id, self._room_id):
+            return HVACMode.OFF
+        return HVACMode.HEAT
 
     @property
     def hvac_action(self) -> HVACAction:
         """Return the current HVAC action."""
-        if self._hvac_mode == HVACMode.OFF:
+        if self.hvac_mode == HVACMode.OFF:
             return HVACAction.OFF
 
         if not self.coordinator.data:
@@ -278,25 +279,11 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         return 0
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        """Set new HVAC mode."""
-        self._hvac_mode = hvac_mode
-
-        if hvac_mode == HVACMode.OFF and self.coordinator.data:
-            # Set all TRVs in this room to minimum temperature
-            zone_data = self.coordinator.data.get(self._zone_id, {})
-            rooms = zone_data.get("rooms", {})
-            room_data = rooms.get(self._room_id, {})
-
-            for trv_id in room_data.get("trvs", []):
-                await self.hass.services.async_call(
-                    "climate",
-                    "set_temperature",
-                    {"entity_id": trv_id, "temperature": self.coordinator.minimum_temp},
-                    blocking=True,
-                )
-
+        """Switch the room off (TRVs held at minimum, no heat demand) or back on."""
+        await self.coordinator.set_room_off(
+            self._zone_id, self._room_id, hvac_mode == HVACMode.OFF
+        )
         self.async_write_ha_state()
-        await self.coordinator.async_request_refresh()
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set new target temperature.

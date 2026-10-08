@@ -146,3 +146,9 @@ def test_zone_demand_state_persists_round_trip(logic):
     restored = HeatingLogic(0.3)
     restored.restore_state(logic.get_state_for_storage())
     assert restored.calculate_zone_heating_demand({"a": room(19.8, 20)}, mode, "z") is True
+
+
+def test_off_rooms_ignored_for_demand_even_when_boosted(logic):
+    rooms = {"a": {**room(15, 20, True, boost={"temperature": 22}), "off": True}, "b": room(20, 20)}
+    assert logic.calculate_zone_heating_demand(rooms, HEATING_DEMAND_MODE_ANY_ROOM, "z") is False
+    assert logic.calculate_zone_heating_demand(rooms, HEATING_DEMAND_MODE_ZONE_AVERAGE, "z") is False

@@ -489,3 +489,42 @@ async def test_default_boost_works_without_room_temperature(hass, basic):
     hass.states.async_set(SENSOR, "unavailable")
     await coordinator.set_boost("zone_1", "room")
     assert coordinator.boost_manager.get_boost_info("zone_1", "room", NOON)["temperature"] == 21.0
+
+
+# ---------------------------------------------------------------------------
+# Rooms switched off
+# ---------------------------------------------------------------------------
+
+async def test_off_room_survives_restart(hass, basic, make_coordinator):
+    coordinator, trv = basic
+    await coordinator.set_room_off("zone_1", "room", True)
+    restarted = make_coordinator(single_room_config())
+    await refresh(restarted)
+    assert restarted.is_room_off("zone_1", "room")
+    assert room_data(restarted)["off"] is True
+    assert room_data(restarted)["needs_heating"] is False
+    assert trv.target_temperature == restarted.minimum_temp
+
+
+async def test_cold_off_room_does_not_drive_zone_average(hass, add_trvs, make_coordinator):
+    await add_trvs(FakeTRV("a_trv", current_temperature=19.5), FakeTRV("b_trv", current_temperature=12.0))
+    set_temp(hass, "sensor.a", 19.5)
+    set_temp(hass, "sensor.b", 12.0)
+    cfg = make_config({"zone_1": {"schedule": ALL_DAY_19, "heating_demand_mode": "zone_average", "rooms": {
+        "a": make_room("A", ["climate.a_trv"], ["sensor.a"]),
+        "b": make_room("B", ["climate.b_trv"], ["sensor.b"]),
+    }}})
+    coordinator = make_coordinator(cfg)
+    await coordinator.set_room_off("zone_1", "b", True)
+    await refresh(coordinator)
+    assert coordinator.data["zone_1"]["heating_demand"] is False
+
+
+async def test_set_room_off_twice_and_on_is_idempotent(basic):
+    coordinator, _ = basic
+    await coordinator.set_room_off("zone_1", "room", True)
+    await coordinator.set_room_off("zone_1", "room", True)
+    assert coordinator.rooms_off == {"zone_1": ["room"]}
+    await coordinator.set_room_off("zone_1", "room", False)
+    await coordinator.set_room_off("zone_1", "room", False)
+    assert coordinator.rooms_off == {}

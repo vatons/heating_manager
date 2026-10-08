@@ -99,6 +99,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         self.manual_room_temp: dict[str, dict[str, dict]] = {}  # zone_id -> room_id -> {temperature, last_scheduled_temp}
         self._loaded_state = False
         self._zone_heating_start: dict[str, Any] = {}  # zone_id -> datetime when demand started
+        self.rooms_off: dict[str, list[str]] = {}  # zone_id -> room_ids switched off by the user
 
         # Initialize manager components
         self.temperature_manager = TemperatureManager(hass)
@@ -251,15 +252,23 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                         )
                         target_temp = self.minimum_temp
 
+                    room_off = self.is_room_off(zone_id, room_id)
+
                     # Determine if room needs heating using smart deadband logic
                     needs_heating = self.heating_logic.calculate_heating_need(
                         zone_id, room_id, room_temp, target_temp
                     )
 
-                    # Set TRV temperatures
-                    await self.trv_manager.set_trv_temperatures(
-                        zone_id, room_id, room_config, target_temp, room_temp, needs_heating
-                    )
+                    if room_off:
+                        # Switched off by the user: hold TRVs at minimum and never demand heat
+                        needs_heating = False
+                        for trv_id in room_config.get("trvs", []):
+                            await self.trv_controller.set_trv_setpoint(trv_id, self.minimum_temp)
+                    else:
+                        # Set TRV temperatures
+                        await self.trv_manager.set_trv_temperatures(
+                            zone_id, room_id, room_config, target_temp, room_temp, needs_heating
+                        )
 
                     # Collect TRV offset information for display
                     trv_offset_info = await self.trv_manager.get_trv_offset_info(
@@ -289,6 +298,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                         "target_temperature": target_temp,
                         "boost": boost_info,
                         "needs_heating": needs_heating,
+                        "off": room_off,
                         "trvs": room_config.get("trvs", []),
                         "sensors": sensor_entity_ids,
                         "temperature_source": temp_metadata["source"],
@@ -477,6 +487,23 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             base = max(base, room_temp)
         return base + DEFAULT_BOOST_TEMP_INCREASE
 
+    def is_room_off(self, zone_id: str, room_id: str) -> bool:
+        """Whether the user has switched this room off."""
+        return room_id in self.rooms_off.get(zone_id, [])
+
+    async def set_room_off(self, zone_id: str, room_id: str, off: bool) -> None:
+        """Switch a room off (TRVs held at minimum, no heat demand) or back on."""
+        rooms = self.rooms_off.setdefault(zone_id, [])
+        if off and room_id not in rooms:
+            rooms.append(room_id)
+        elif not off and room_id in rooms:
+            rooms.remove(room_id)
+        if not rooms:
+            self.rooms_off.pop(zone_id, None)
+        _LOGGER.info("Room %s/%s switched %s", zone_id, room_id, "off" if off else "on")
+        await self._save_state()
+        await self.async_request_refresh()
+
     async def set_boost(
         self,
         zone_id: str,
@@ -500,6 +527,11 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 f"Failed to set boost for {zone_id}/{room_id}: "
                 "room not found, has no sensors, or room temperature is unavailable"
             )
+        # Boosting is an explicit request for heat, so it switches an off room back on
+        if self.is_room_off(zone_id, room_id):
+            self.rooms_off[zone_id].remove(room_id)
+            if not self.rooms_off[zone_id]:
+                del self.rooms_off[zone_id]
         # Clear any manual room override so it doesn't linger while boost is active
         if zone_id in self.manual_room_temp and room_id in self.manual_room_temp[zone_id]:
             del self.manual_room_temp[zone_id][room_id]
@@ -641,6 +673,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             self.away_mode = data.get("away_mode", False)
             self.manual_zone_temp = data.get("manual_zone_temp", {})
             self.manual_room_temp = data.get("manual_room_temp", {})
+            self.rooms_off = data.get("rooms_off", {})
 
             # Restore boost state (only if not expired)
             stored_boost = data.get("boost_state", {})
@@ -667,6 +700,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             "boost_state": self.boost_manager.get_state_for_storage(),
             "manual_zone_temp": self.manual_zone_temp,
             "manual_room_temp": self.manual_room_temp,
+            "rooms_off": self.rooms_off,
             "room_heating_state": self.heating_logic.get_state_for_storage(),
             "trv_offset_history": self.trv_controller.get_offset_history_for_storage(),
         }
