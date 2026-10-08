@@ -200,7 +200,7 @@ data:
   zone_id: zone_1
   room_id: living_room
   duration: 60  # minutes (optional, default: 30)
-  temperature: 22  # °C (optional, default: current room temp + 2°C)
+  temperature: 22  # °C (optional, default: room's current target, or its temperature if higher, + 2°C)
 ```
 
 Clear boost:
@@ -420,7 +420,7 @@ The system automatically uses the most accurate timestamp available and indicate
 
 **Boost** (via the `boost` preset or `set_boost` service):
 - Temporarily raises a specific room's temperature above the schedule
-- Default: +2°C above current room temperature for 30 minutes
+- Default: +2°C above the room's current target (or its current temperature, if higher) for 30 minutes
 - Room-level — other rooms in the zone continue following the schedule
 - Any existing manual room override for that room is cleared when boost activates
 - Boost state persists across Home Assistant restarts
@@ -465,9 +465,11 @@ When the zone schedule sets a target temperature of 19.5°C:
 - **Active rooms**: Home offices or living rooms can be offset higher during work hours
 
 **Important notes:**
-- The offset applies to **all** temperature sources (scheduled, manual, boost, and away mode)
+- The offset applies to targets the room inherits from its zone: the schedule and a zone-level manual temperature
+- Targets set for the room itself are used exactly as set: a manual temperature set on the room's climate entity, and boost temperatures
+- Away mode uses `frost_protection_temp` exactly, without the offset
 - Offsets can be positive (warmer) or negative (cooler)
-- The offset is applied after the zone target is determined, ensuring consistent behavior
+- The room's climate entity shows the offset target; setting the room back to that value clears its manual override
 - Each room's heating demand and TRV control uses the offset-adjusted target
 
 ### Manual Override Detection

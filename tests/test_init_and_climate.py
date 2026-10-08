@@ -278,11 +278,6 @@ async def test_room_off_keeps_trvs_closed(hass, setup_hm):
     assert hass.states.get(ZONE).attributes["rooms_needing_heat"] == []
 
 
-@pytest.mark.xfail(
-    reason="BUG: a room with temperature_offset compares the user's value with the "
-    "un-offset schedule, so re-selecting the displayed target creates an override "
-    "and the target drops by the offset again"
-)
 async def test_setting_room_to_its_displayed_target_changes_nothing(hass, setup_hm, tmp_path):
     zones = {
         "downstairs": {
@@ -326,3 +321,21 @@ async def test_unquoted_schedule_times_in_yaml_file(hass, setup_hm, tmp_path):
     assert hass.states.get(ROOM).attributes[ATTR_TEMPERATURE] == 20.5
     schedule = hass.states.get(ZONE).attributes["schedule"]
     assert schedule["current_period"]["end"] == "21:00"
+
+
+async def test_room_with_offset_set_below_its_target_creates_override(hass, setup_hm, tmp_path):
+    zones = {
+        "downstairs": {
+            "name": "Downstairs",
+            "schedule": ALL_DAY_19,
+            "rooms": {
+                "lounge": make_room("Lounge", ["climate.lounge_trv"], ["sensor.lounge"], temperature_offset=-1.0),
+                "study": make_room("Study", ["climate.study_trv"], ["sensor.study"]),
+            },
+        }
+    }
+    await setup_hm(config_path=write_config(tmp_path, zones=zones))
+    await call(hass, SERVICE_SET_TEMPERATURE, {ATTR_ENTITY_ID: ROOM, ATTR_TEMPERATURE: 17.0})
+    state = hass.states.get(ROOM)
+    assert state.attributes[ATTR_TEMPERATURE] == 17.0
+    assert state.attributes["manual_override"]["active"] is True

@@ -218,10 +218,6 @@ async def test_boost_update_and_clear(basic):
     assert room_data(coordinator)["target_temperature"] == 19.0
 
 
-@pytest.mark.xfail(
-    reason="BUG: default boost is room temp + 2°C, so boosting a cold room LOWERS its "
-    "target below the schedule (services.yaml says schedule + 2°C)"
-)
 async def test_default_boost_never_lowers_target(hass, basic):
     coordinator, trv = basic
     set_temp(hass, SENSOR, 15.0)
@@ -251,10 +247,6 @@ async def test_room_offset_never_below_frost_protection(hass, add_trvs, make_coo
     assert room_data(coordinator)["target_temperature"] == 5.0
 
 
-@pytest.mark.xfail(
-    reason="BUG: room temperature_offset is also applied to a room's own manual "
-    "temperature, so setting the lounge to 21°C gives a target of 20°C"
-)
 async def test_room_offset_not_applied_to_manual_room_temperature(hass, add_trvs, make_coordinator):
     await add_trvs(FakeTRV("room_trv"))
     set_temp(hass, SENSOR, 18.0)
@@ -264,9 +256,6 @@ async def test_room_offset_not_applied_to_manual_room_temperature(hass, add_trvs
     assert room_data(coordinator)["target_temperature"] == 21.0
 
 
-@pytest.mark.xfail(
-    reason="BUG: room temperature_offset is also applied to an explicit boost temperature"
-)
 async def test_room_offset_not_applied_to_boost(hass, add_trvs, make_coordinator):
     await add_trvs(FakeTRV("room_trv"))
     set_temp(hass, SENSOR, 18.0)
@@ -440,3 +429,63 @@ async def test_loads_v1_storage(hass, hass_storage, basic, make_coordinator):
     await refresh(coordinator)
     assert room_data(coordinator)["target_temperature"] == 20.5
     assert "zone_1" in coordinator.trv_controller.offset_ema
+
+
+# ---------------------------------------------------------------------------
+# Room offset rules and default boost
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+async def offset_room(hass, add_trvs, make_coordinator):
+    """Room with temperature_offset -1 under a 19°C all-day schedule."""
+    await add_trvs(FakeTRV("room_trv", current_temperature=17.0))
+    set_temp(hass, SENSOR, 17.0)
+    return make_coordinator(single_room_config(temperature_offset=-1.0))
+
+
+async def test_room_offset_applied_to_zone_override(offset_room):
+    await offset_room.set_manual_zone_temperature("zone_1", 21.0)
+    await refresh(offset_room)
+    assert room_data(offset_room)["target_temperature"] == 20.0
+
+
+async def test_room_offset_not_applied_in_away_mode(hass, add_trvs, make_coordinator):
+    await add_trvs(FakeTRV("room_trv"))
+    set_temp(hass, SENSOR, 17.0)
+    coordinator = make_coordinator(single_room_config(temperature_offset=2.0))
+    await coordinator.set_away_mode(True)
+    await refresh(coordinator)
+    assert room_data(coordinator)["target_temperature"] == 5.0
+
+
+async def test_room_default_temperature(offset_room):
+    assert offset_room.get_room_default_temperature("zone_1", "room") == 18.0
+    assert offset_room.get_room_default_temperature("zone_1", "nope") is None
+    assert offset_room.get_room_default_temperature("nope", "room") is None
+
+
+async def test_default_boost_from_warm_room(hass, basic):
+    coordinator, _ = basic
+    set_temp(hass, SENSOR, 21.0)
+    await coordinator.set_boost("zone_1", "room")
+    assert coordinator.boost_manager.get_boost_info("zone_1", "room", NOON)["temperature"] == 23.0
+
+
+async def test_default_boost_from_manual_override(basic):
+    coordinator, _ = basic
+    await coordinator.set_manual_room_temperature("zone_1", "room", 21.5)
+    await coordinator.set_boost("zone_1", "room")
+    assert coordinator.boost_manager.get_boost_info("zone_1", "room", NOON)["temperature"] == 23.5
+
+
+async def test_default_boost_with_room_offset(offset_room):
+    await offset_room.set_boost("zone_1", "room")
+    # default target 18 (19 - 1) is above the 17°C room
+    assert offset_room.boost_manager.get_boost_info("zone_1", "room", NOON)["temperature"] == 20.0
+
+
+async def test_default_boost_works_without_room_temperature(hass, basic):
+    coordinator, _ = basic
+    hass.states.async_set(SENSOR, "unavailable")
+    await coordinator.set_boost("zone_1", "room")
+    assert coordinator.boost_manager.get_boost_info("zone_1", "room", NOON)["temperature"] == 21.0

@@ -311,6 +311,9 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         Without boost:
           - temp == schedule  → clear manual override (revert to schedule)
           - any other temp    → set manual override
+
+        "schedule" here is the room's default target: the schedule (or zone
+        override) with the room's temperature_offset applied.
         """
         temperature = kwargs.get(ATTR_TEMPERATURE)
         if temperature is None:
@@ -318,8 +321,11 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
 
         from homeassistant.util import dt as dt_util
         current_time = dt_util.now()
-        zone_config = self.coordinator.config.get("zones", {}).get(self._zone_id, {})
-        scheduled_temp = self.coordinator.schedule_manager.get_scheduled_temperature(zone_config, current_time)
+        # What the room targets without a room-level override: schedule (or zone
+        # override) plus the room's temperature_offset, as shown in the UI.
+        scheduled_temp = self.coordinator.get_room_default_temperature(
+            self._zone_id, self._room_id, current_time
+        )
 
         # Check boost_manager directly — it's updated synchronously before the
         # coordinator refresh, so coordinator.data may still reflect the old state.

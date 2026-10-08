@@ -14,6 +14,7 @@ from .const import (
     CONF_ROOMS,
     CONF_SCHEDULE,
     CONF_TEMPERATURE_OFFSET,
+    DEFAULT_BOOST_TEMP_INCREASE,
     DEFAULT_HEATING_DEMAND_MODE,
     DEFAULT_MAX_HEATING_DURATION,
     DOMAIN,
@@ -186,7 +187,10 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     # Check for boost
                     boost_info = self.boost_manager.get_boost_info(zone_id, room_id, current_time)
 
-                    # Get target temperature - priority: away > boost > manual room > manual zone > schedule
+                    # Get target temperature - priority: away > boost > manual room > manual zone > schedule.
+                    # The room's temperature_offset only adjusts targets the room inherits
+                    # (schedule, zone override); away, boost and a room's own manual
+                    # temperature are used exactly as set.
                     if self.away_mode:
                         target_temp = self.frost_protection_temp
                         _LOGGER.debug(
@@ -210,10 +214,13 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                         )
                         if scheduled_temp != room_manual_info.get("last_scheduled_temp"):
                             _expired_room_overrides.append((zone_id, room_id))
-                            target_temp = scheduled_temp
+                            target_temp = self._room_default_temperature(
+                                zone_id, room_id, zone_config, room_config, current_time,
+                                _expired_zone_overrides,
+                            )
                             _state_changed = True
                             _LOGGER.debug(
-                                "Zone %s / Room %s: Schedule changed, cleared room manual override, using scheduled temp: %.1f°C",
+                                "Zone %s / Room %s: Schedule changed, cleared room manual override, using %.1f°C",
                                 zone_id,
                                 room_id,
                                 target_temp,
@@ -226,42 +233,13 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                                 room_id,
                                 target_temp,
                             )
-                    elif zone_id in self.manual_zone_temp:
-                        # Check if manual temp should still be active
-                        manual_info = self.manual_zone_temp[zone_id]
-                        scheduled_temp = self.schedule_manager.get_scheduled_temperature(
-                            zone_config, current_time
-                        )
-
-                        # If schedule changed, clear manual override
-                        if scheduled_temp != manual_info.get("last_scheduled_temp"):
-                            _expired_zone_overrides.append(zone_id)
-                            target_temp = scheduled_temp
-                            _state_changed = True
-                            _LOGGER.debug(
-                                "Zone %s / Room %s: Schedule changed, cleared zone manual override, using scheduled temp: %.1f°C",
-                                zone_id,
-                                room_id,
-                                target_temp,
-                            )
-                        else:
-                            target_temp = manual_info["temperature"]
-                            _LOGGER.debug(
-                                "Zone %s / Room %s: Using zone manual temp: %.1f°C",
-                                zone_id,
-                                room_id,
-                                target_temp,
-                            )
                     else:
-                        target_temp = self.schedule_manager.get_scheduled_temperature(
-                            zone_config, current_time
+                        target_temp = self._room_default_temperature(
+                            zone_id, room_id, zone_config, room_config, current_time,
+                            _expired_zone_overrides,
                         )
-                        _LOGGER.debug(
-                            "Zone %s / Room %s: Using scheduled temp: %.1f°C",
-                            zone_id,
-                            room_id,
-                            target_temp,
-                        )
+                        if zone_id in _expired_zone_overrides:
+                            _state_changed = True
 
                     # Safety check: ensure target_temp is never None
                     if target_temp is None:
@@ -272,28 +250,6 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                             room_id,
                         )
                         target_temp = self.minimum_temp
-
-                    # Apply room temperature offset if configured
-                    temperature_offset = room_config.get(CONF_TEMPERATURE_OFFSET, 0.0)
-                    if temperature_offset != 0.0:
-                        if abs(temperature_offset) > 5.0:
-                            _LOGGER.warning(
-                                "Zone %s / Room %s: temperature_offset %.1f°C is unusually large. "
-                                "Check configuration — the result will be clamped to safe bounds.",
-                                zone_id, room_id, temperature_offset,
-                            )
-                        original_target = target_temp
-                        target_temp = target_temp + temperature_offset
-                        # Clamp: never below frost_protection_temp, never above MAX_BOOST_TEMP
-                        target_temp = max(self.frost_protection_temp, min(target_temp, MAX_BOOST_TEMP))
-                        _LOGGER.debug(
-                            "Zone %s / Room %s: Applied temperature offset %.1f°C (%.1f°C -> %.1f°C)",
-                            zone_id,
-                            room_id,
-                            temperature_offset,
-                            original_target,
-                            target_temp,
-                        )
 
                     # Determine if room needs heating using smart deadband logic
                     needs_heating = self.heating_logic.calculate_heating_need(
@@ -437,6 +393,90 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             _LOGGER.exception("Error updating heating manager data: %s", err)
             raise UpdateFailed(f"Error updating data: {err}")
 
+    def _apply_room_offset(
+        self, zone_id: str, room_id: str, room_config: dict, temperature: float
+    ) -> float:
+        """Apply a room's temperature_offset, clamped to safe bounds."""
+        temperature_offset = room_config.get(CONF_TEMPERATURE_OFFSET, 0.0)
+        if not temperature_offset:
+            return temperature
+        if abs(temperature_offset) > 5.0:
+            _LOGGER.warning(
+                "Zone %s / Room %s: temperature_offset %.1f°C is unusually large. "
+                "Check configuration — the result will be clamped to safe bounds.",
+                zone_id, room_id, temperature_offset,
+            )
+        adjusted = temperature + temperature_offset
+        # Clamp: never below frost_protection_temp, never above MAX_BOOST_TEMP
+        adjusted = max(self.frost_protection_temp, min(adjusted, MAX_BOOST_TEMP))
+        _LOGGER.debug(
+            "Zone %s / Room %s: Applied temperature offset %.1f°C (%.1f°C -> %.1f°C)",
+            zone_id, room_id, temperature_offset, temperature, adjusted,
+        )
+        return adjusted
+
+    def _room_default_temperature(
+        self,
+        zone_id: str,
+        room_id: str,
+        zone_config: dict,
+        room_config: dict,
+        current_time: datetime,
+        expired_zone_overrides: list[str] | None = None,
+    ) -> float:
+        """Target a room inherits: the zone override (if still valid) or the schedule, plus offset.
+
+        A zone override whose schedule period has ended is not used; its
+        zone_id is appended to expired_zone_overrides when that list is given.
+        """
+        scheduled_temp = self.schedule_manager.get_scheduled_temperature(
+            zone_config, current_time
+        )
+        base = scheduled_temp
+        manual_info = self.manual_zone_temp.get(zone_id)
+        if manual_info is not None:
+            if scheduled_temp == manual_info.get("last_scheduled_temp"):
+                base = manual_info["temperature"]
+                _LOGGER.debug(
+                    "Zone %s / Room %s: Using zone manual temp: %.1f°C", zone_id, room_id, base
+                )
+            elif expired_zone_overrides is not None and zone_id not in expired_zone_overrides:
+                expired_zone_overrides.append(zone_id)
+                _LOGGER.debug(
+                    "Zone %s: Schedule changed, cleared zone manual override", zone_id
+                )
+        return self._apply_room_offset(zone_id, room_id, room_config, base)
+
+    def get_room_default_temperature(
+        self, zone_id: str, room_id: str, current_time: datetime | None = None
+    ) -> float | None:
+        """Public: the room's target with no room-level override (schedule or zone override + offset)."""
+        zone_config = self.config.get("zones", {}).get(zone_id)
+        if not isinstance(zone_config, dict):
+            return None
+        room_config = zone_config.get(CONF_ROOMS, {}).get(room_id)
+        if not isinstance(room_config, dict):
+            return None
+        return self._room_default_temperature(
+            zone_id, room_id, zone_config, room_config, current_time or dt_util.now()
+        )
+
+    async def _default_boost_temperature(self, zone_id: str, room_id: str) -> float | None:
+        """Default boost: the room's current target, or its temperature if higher, + 2°C."""
+        base = self.get_room_default_temperature(zone_id, room_id)
+        if base is None:
+            return None
+        manual = self.manual_room_temp.get(zone_id, {}).get(room_id, {}).get("temperature")
+        if manual is not None:
+            base = max(base, manual)
+        zones = self.config.get("zones", {})
+        room_temp, _ = await self.temperature_manager.get_room_temperature(
+            zone_id, room_id, zones[zone_id][CONF_ROOMS][room_id], zones
+        )
+        if room_temp is not None:
+            base = max(base, room_temp)
+        return base + DEFAULT_BOOST_TEMP_INCREASE
+
     async def set_boost(
         self,
         zone_id: str,
@@ -445,6 +485,8 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         temperature: float | None = None,
     ) -> None:
         """Set boost mode for a room."""
+        if temperature is None:
+            temperature = await self._default_boost_temperature(zone_id, room_id)
         success = await self.boost_manager.set_boost(
             zone_id,
             room_id,

@@ -30,7 +30,7 @@ set_boost:
           unit_of_measurement: minutes
     temperature:
       name: Temperature
-      description: Target temperature during boost (default is current schedule + 2°C)
+      description: Target temperature during boost (default is the room's current target, or its current temperature if higher, + 2°C)
       required: false
       example: 22
       selector:
