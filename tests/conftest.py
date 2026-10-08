@@ -23,6 +23,7 @@ from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
 from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
     MockModule,
     MockPlatform,
     mock_integration,
@@ -30,6 +31,7 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.heating_manager.coordinator import HeatingManagerCoordinator
+from custom_components.heating_manager.entry_data import zones_to_subentries
 from custom_components.heating_manager.const import (
     DEFAULT_ANALYTICS_HISTORY_SIZE,
     DEFAULT_ANALYTICS_MIN_SAMPLES,
@@ -257,3 +259,19 @@ async def make_coordinator(hass: HomeAssistant):
     yield _make
     for coordinator in created:
         await coordinator.async_shutdown()
+
+
+def entry_from_options(options: dict, **kwargs) -> MockConfigEntry:
+    """A current-version config entry from the 2.x options layout ({"settings", "zones"}).
+
+    Zones and rooms become subentries, as they are after migration.
+    """
+    return MockConfigEntry(
+        domain="heating_manager",
+        title="Heating Manager",
+        data={},
+        version=2,
+        options={"settings": dict(options.get("settings") or {})},
+        subentries_data=zones_to_subentries(options.get("zones") or {}),
+        **kwargs,
+    )

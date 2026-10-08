@@ -1,4 +1,10 @@
-"""Config and options flows for Heating Manager (UI setup)."""
+"""Config flow, zone/room subentry flows and options flow for Heating Manager.
+
+- Add Integration: name the first zone; creates the entry and that zone.
+- Zones and rooms are subentries: added, reconfigured and deleted from the
+  integration page, each with a single form. Changes apply immediately.
+- Configure (options): Settings (one form in sections) and Import from YAML file.
+"""
 from __future__ import annotations
 
 import copy
@@ -12,9 +18,13 @@ from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
     ConfigFlowResult,
+    ConfigSubentry,
+    ConfigSubentryFlow,
     OptionsFlow,
+    SubentryFlowResult,
 )
 from homeassistant.core import callback
+from homeassistant.data_entry_flow import section
 from homeassistant.helpers import selector
 
 from .const import (
@@ -33,45 +43,63 @@ from .const import (
     DOMAIN,
 )
 from .entry_data import (
+    CONF_ROOM_ID,
+    CONF_WEEKEND_SAME,
+    CONF_ZONE_ID,
+    DEFAULT_SCHEDULE_PERIOD,
     HEATING_DEMAND_MODES,
     OPT_SETTINGS,
     OPT_ZONES,
-    SETTINGS,
     SETTINGS_BY_KEY,
+    SUBENTRY_ROOM,
+    SUBENTRY_ZONE,
     SettingSpec,
     coerce_setting,
     dedupe_trvs,
-    format_period,
-    new_options,
-    new_zone,
-    period_minutes,
-    room_label,
+    default_settings,
+    entry_to_runtime,
+    first_overlap,
+    room_title,
+    schedule_overlaps,
     sort_periods,
-    trv_owner,
     unique_id_for,
     yaml_to_options,
+    zone_subentry,
+    zones_to_subentries,
 )
 from .schedule_manager import format_time, parse_time
 
 TITLE = "Heating Manager"
-
-ADD = "__add__"
-SAVE = "__save__"
-BACK = "__back__"
-COPY = "__copy__"
 GLOBAL = "global"
 
 CONF_NAME = "name"
 CONF_ZONE = "zone"
-CONF_ROOM = "room"
-CONF_DAY = "day"
-CONF_PERIOD = "period"
-CONF_DELETE = "delete"
+CONF_PERIODS = "periods"
+CONF_SAME = "same_as_weekdays"
+CONF_ADVANCED = "advanced"
+CONF_LAST_SEEN = "last_seen"
 CONF_CONFIRM = "confirm"
-CONF_LAST_SEEN = "configure_last_seen"
 CONF_PATH = "path"
 CONF_IMPORT_SETTINGS = "import_settings"
 DEFAULT_IMPORT_PATH = "heating_manager.yaml"
+
+# Settings form: (section, setting keys, collapsed)
+SETTINGS_SECTIONS: tuple[tuple[str, tuple[str, ...], bool], ...] = (
+    ("temperatures", ("minimum_temp", "frost_protection_temp"), False),
+    ("heating_demand", ("heating_demand_mode", "heating_deadband"), False),
+    ("boiler", ("min_boiler_on_time", "min_boiler_off_time"), False),
+    ("sensors", ("fallback_mode",), False),
+    ("boost", ("boost_duration",), False),
+    ("trv_control", (
+        "trv_overshoot_enabled", "trv_overshoot_max", "trv_overshoot_threshold",
+        "trv_cooldown_offset", "trv_offset_ema_alpha",
+    ), True),
+    ("analytics", (
+        "analytics_enabled", "analytics_history_size", "analytics_min_samples",
+        "derivative_smoothing_factor",
+    ), True),
+    ("updates", ("update_interval",), True),
+)
 
 
 def _setting_selector(spec: SettingSpec) -> selector.Selector:
@@ -93,30 +121,91 @@ def _setting_selector(spec: SettingSpec) -> selector.Selector:
     return selector.NumberSelector(config)
 
 
-def _choice(options: list[dict[str, str]]) -> selector.SelectSelector:
-    """A list of choices, always ending with 'Save and close'."""
-    options = [*options, {"value": SAVE, "label": "💾 Save and close"}]
-    return selector.SelectSelector(
-        selector.SelectSelectorConfig(options=options, mode=selector.SelectSelectorMode.LIST)
+# A day's schedule: an editable list of periods, each edited in its own dialog
+PERIODS_SELECTOR = selector.ObjectSelector(
+    selector.ObjectSelectorConfig(
+        multiple=True,
+        label_field=CONF_START,
+        description_field=CONF_TEMPERATURE,
+        translation_key="schedule_period",
+        fields={
+            CONF_START: {"required": True, "selector": {"time": {}}},
+            CONF_END: {"required": True, "selector": {"time": {}}},
+            CONF_TEMPERATURE: {
+                "required": True,
+                "selector": {"number": {
+                    "min": 5, "max": 30, "step": 0.5, "unit_of_measurement": "°C", "mode": "box",
+                }},
+            },
+        },
     )
+)
 
-
-TEMPERATURE_SELECTOR = selector.NumberSelector(
-    selector.NumberSelectorConfig(
-        min=5, max=30, step=0.5, unit_of_measurement="°C", mode=selector.NumberSelectorMode.BOX
+LAST_SEEN_SELECTOR = selector.ObjectSelector(
+    selector.ObjectSelectorConfig(
+        multiple=True,
+        label_field="temperature",
+        description_field=CONF_LAST_SEEN,
+        translation_key="last_seen_sensor",
+        fields={
+            "temperature": {"required": True, "selector": {"entity": {"domain": "sensor"}}},
+            CONF_LAST_SEEN: {"required": True, "selector": {"entity": {"domain": "sensor"}}},
+        },
     )
 )
 
 
+def _periods_for_form(periods: list[dict]) -> list[dict]:
+    """Stored "HH:MM" periods as the time selector's "HH:MM:SS" values."""
+    return [
+        {CONF_START: f"{p[CONF_START]}:00", CONF_END: f"{p[CONF_END]}:00", CONF_TEMPERATURE: p[CONF_TEMPERATURE]}
+        for p in periods
+    ]
+
+
+def _periods_from_form(items: list[dict] | None) -> list[dict] | None:
+    """Validate and normalise a list of periods; None if a time is invalid."""
+    periods = []
+    for item in items or []:
+        start, end = parse_time(item.get(CONF_START)), parse_time(item.get(CONF_END))
+        try:
+            temperature = float(item.get(CONF_TEMPERATURE))
+        except (TypeError, ValueError):
+            return None
+        if start is None or end is None:
+            return None
+        periods.append({
+            CONF_START: format_time(start % 1440),
+            CONF_END: format_time(end % 1440),
+            CONF_TEMPERATURE: temperature,
+        })
+    return sort_periods(periods)
+
+
+def _subentries(entry: ConfigEntry, subentry_type: str) -> list[ConfigSubentry]:
+    return [s for s in entry.subentries.values() if s.subentry_type == subentry_type]
+
+
+# ---------------------------------------------------------------------------
+# Add Integration (and YAML import)
+# ---------------------------------------------------------------------------
+
 class HeatingManagerConfigFlow(ConfigFlow, domain=DOMAIN):
     """Add Integration wizard and YAML import."""
 
-    VERSION = 1
+    VERSION = 2
 
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
         return HeatingManagerOptionsFlow()
+
+    @classmethod
+    @callback
+    def async_get_supported_subentry_types(
+        cls, config_entry: ConfigEntry
+    ) -> dict[str, type[ConfigSubentryFlow]]:
+        return {SUBENTRY_ZONE: ZoneSubentryFlow, SUBENTRY_ROOM: RoomSubentryFlow}
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if self._async_current_entries():
@@ -127,7 +216,16 @@ class HeatingManagerConfigFlow(ConfigFlow, domain=DOMAIN):
             if not name:
                 errors[CONF_NAME] = "name_required"
             else:
-                return self.async_create_entry(title=TITLE, data={}, options=new_options(name))
+                zone_id = unique_id_for(name, set(), "zone_1")
+                zone = {"name": name, CONF_SCHEDULE: {
+                    CONF_WEEKDAY: [dict(DEFAULT_SCHEDULE_PERIOD)], CONF_WEEKEND: [dict(DEFAULT_SCHEDULE_PERIOD)],
+                }}
+                return self.async_create_entry(
+                    title=TITLE,
+                    data={},
+                    options={OPT_SETTINGS: default_settings()},
+                    subentries=[zone_subentry(zone_id, zone)],
+                )
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema({vol.Required(CONF_NAME, default="Home"): str}),
@@ -138,50 +236,366 @@ class HeatingManagerConfigFlow(ConfigFlow, domain=DOMAIN):
         """Create the entry from heating_manager.yaml (converted by yaml_to_options)."""
         if self._async_current_entries():
             return self.async_abort(reason="already_configured")
-        return self.async_create_entry(title=TITLE, data={}, options=import_data)
-
-
-class HeatingManagerOptionsFlow(OptionsFlow):
-    """Configure menu: zones, rooms, schedules and settings.
-
-    Edits are collected in memory and written when "Save and close" is chosen.
-    """
-
-    def __init__(self) -> None:
-        self._options: dict[str, Any] | None = None
-        self._zone_id: str | None = None
-        self._room_id: str | None = None
-        self._day: str | None = None
-        self._period_index: int | None = None
-        self._pending_import: dict[str, Any] | None = None
-
-    @property
-    def options(self) -> dict[str, Any]:
-        if self._options is None:
-            self._options = copy.deepcopy(dict(self.config_entry.options))
-            self._options.setdefault(OPT_SETTINGS, {})
-            self._options.setdefault(OPT_ZONES, {})
-        return self._options
-
-    @property
-    def _zones(self) -> dict[str, dict]:
-        return self.options[OPT_ZONES]
-
-    @property
-    def _zone(self) -> dict:
-        return self._zones[self._zone_id]
-
-    # -- main menu ---------------------------------------------------------
-
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        return self.async_show_menu(
-            step_id="init", menu_options=["zones", "settings", "advanced", "import_yaml", "save"]
+        return self.async_create_entry(
+            title=TITLE,
+            data={},
+            options={OPT_SETTINGS: import_data.get(OPT_SETTINGS, {})},
+            subentries=zones_to_subentries(import_data.get(OPT_ZONES, {})),
         )
 
-    async def async_step_save(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        return self.async_create_entry(data=self.options)
 
-    # -- import from YAML ----------------------------------------------------
+# ---------------------------------------------------------------------------
+# Zones
+# ---------------------------------------------------------------------------
+
+class ZoneSubentryFlow(ConfigSubentryFlow):
+    """Add or reconfigure a zone: name, demand mode, monitoring and schedules."""
+
+    def _schema(self, data: dict) -> vol.Schema:
+        schedule = data.get(CONF_SCHEDULE) or {}
+        same = data.get(CONF_WEEKEND_SAME, True)
+        return vol.Schema({
+            vol.Required(CONF_NAME, default=data.get(CONF_NAME, "")): str,
+            vol.Required(
+                CONF_HEATING_DEMAND_MODE, default=data.get(CONF_HEATING_DEMAND_MODE, GLOBAL)
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[GLOBAL, *HEATING_DEMAND_MODES],
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                    translation_key="zone_heating_demand_mode",
+                )
+            ),
+            vol.Required(CONF_MONITORING_ONLY, default=data.get(CONF_MONITORING_ONLY, False)): bool,
+            vol.Required(CONF_WEEKDAY): section(
+                vol.Schema({
+                    vol.Optional(
+                        CONF_PERIODS, default=_periods_for_form(schedule.get(CONF_WEEKDAY, []))
+                    ): PERIODS_SELECTOR,
+                }),
+                {"collapsed": False},
+            ),
+            vol.Required(CONF_WEEKEND): section(
+                vol.Schema({
+                    vol.Required(CONF_SAME, default=same): bool,
+                    vol.Optional(
+                        CONF_PERIODS,
+                        default=[] if same else _periods_for_form(schedule.get(CONF_WEEKEND, [])),
+                    ): PERIODS_SELECTOR,
+                }),
+                {"collapsed": same},
+            ),
+        })
+
+    def _validate(
+        self, user_input: dict, zone_id: str | None
+    ) -> tuple[dict | None, dict[str, str], dict[str, str]]:
+        """Return (zone data, errors, error placeholders)."""
+        errors: dict[str, str] = {}
+        placeholders = {"overlap": ""}
+        name = user_input.get(CONF_NAME, "").strip()
+        if not name:
+            errors[CONF_NAME] = "name_required"
+        elif any(
+            sub.title.casefold() == name.casefold() and sub.data.get(CONF_ZONE_ID) != zone_id
+            for sub in _subentries(self._get_entry(), SUBENTRY_ZONE)
+        ):
+            errors[CONF_NAME] = "name_in_use"
+
+        weekday_in = user_input.get(CONF_WEEKDAY) or {}
+        weekend_in = user_input.get(CONF_WEEKEND) or {}
+        same = bool(weekend_in.get(CONF_SAME, True))
+        weekday = _periods_from_form(weekday_in.get(CONF_PERIODS))
+        weekend = [] if same else _periods_from_form(weekend_in.get(CONF_PERIODS))
+        if weekday is None or weekend is None:
+            errors["base"] = "invalid_time"
+        else:
+            for day, periods in (("Weekdays", weekday), ("Weekends", weekend)):
+                if overlap := first_overlap(periods):
+                    errors["base"] = "overlap"
+                    placeholders["overlap"] = f"{day}: {overlap}"
+                    break
+        if errors:
+            return None, errors, placeholders
+
+        data: dict[str, Any] = {
+            CONF_ZONE_ID: zone_id,
+            CONF_NAME: name,
+            CONF_SCHEDULE: {CONF_WEEKDAY: weekday, CONF_WEEKEND: weekday if same else weekend},
+            CONF_WEEKEND_SAME: same,
+        }
+        if user_input.get(CONF_HEATING_DEMAND_MODE) in HEATING_DEMAND_MODES:
+            data[CONF_HEATING_DEMAND_MODE] = user_input[CONF_HEATING_DEMAND_MODE]
+        if user_input.get(CONF_MONITORING_ONLY):
+            data[CONF_MONITORING_ONLY] = True
+        return data, errors, placeholders
+
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        defaults: dict[str, Any] = {CONF_SCHEDULE: {CONF_WEEKDAY: [dict(DEFAULT_SCHEDULE_PERIOD)]}}
+        errors: dict[str, str] = {}
+        placeholders = {"overlap": ""}
+        if user_input is not None:
+            taken = {sub.data.get(CONF_ZONE_ID) for sub in _subentries(self._get_entry(), SUBENTRY_ZONE)}
+            zone_id = unique_id_for(user_input.get(CONF_NAME, "").strip(), taken, "zone")
+            data, errors, placeholders = self._validate(user_input, zone_id)
+            if data is not None:
+                return self.async_create_entry(title=data[CONF_NAME], data=data, unique_id=zone_id)
+            defaults = self._form_defaults(user_input)
+        return self.async_show_form(
+            step_id="user", data_schema=self._schema(defaults), errors=errors,
+            description_placeholders=placeholders,
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        entry = self._get_entry()
+        subentry = self._get_reconfigure_subentry()
+        zone_id = subentry.data[CONF_ZONE_ID]
+        defaults = dict(subentry.data)
+        errors: dict[str, str] = {}
+        placeholders = {"overlap": ""}
+        if user_input is not None:
+            data, errors, placeholders = self._validate(user_input, zone_id)
+            if data is not None:
+                if data[CONF_NAME] != subentry.title:
+                    # Room titles include their zone's name
+                    for room in _subentries(entry, SUBENTRY_ROOM):
+                        if room.data.get(CONF_ZONE_ID) == zone_id:
+                            self.hass.config_entries.async_update_subentry(
+                                entry, room, title=room_title(room.data[CONF_NAME], data[CONF_NAME])
+                            )
+                return self.async_update_and_abort(entry, subentry, title=data[CONF_NAME], data=data)
+            defaults = self._form_defaults(user_input)
+        return self.async_show_form(
+            step_id="reconfigure", data_schema=self._schema(defaults), errors=errors,
+            description_placeholders=placeholders,
+        )
+
+    @staticmethod
+    def _form_defaults(user_input: dict) -> dict:
+        """Re-show what was entered after a validation error."""
+        weekday = (user_input.get(CONF_WEEKDAY) or {}).get(CONF_PERIODS) or []
+        weekend_in = user_input.get(CONF_WEEKEND) or {}
+        to_stored = lambda items: [  # noqa: E731
+            {CONF_START: str(i.get(CONF_START, ""))[:5], CONF_END: str(i.get(CONF_END, ""))[:5],
+             CONF_TEMPERATURE: i.get(CONF_TEMPERATURE)}
+            for i in items
+        ]
+        return {
+            CONF_NAME: user_input.get(CONF_NAME, ""),
+            CONF_HEATING_DEMAND_MODE: user_input.get(CONF_HEATING_DEMAND_MODE, GLOBAL),
+            CONF_MONITORING_ONLY: user_input.get(CONF_MONITORING_ONLY, False),
+            CONF_SCHEDULE: {
+                CONF_WEEKDAY: to_stored(weekday),
+                CONF_WEEKEND: to_stored(weekend_in.get(CONF_PERIODS) or []),
+            },
+            CONF_WEEKEND_SAME: weekend_in.get(CONF_SAME, True),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Rooms
+# ---------------------------------------------------------------------------
+
+class RoomSubentryFlow(ConfigSubentryFlow):
+    """Add or reconfigure a room: zone, name, TRVs, sensors, offset, last-seen sensors."""
+
+    def _schema(self, data: dict) -> vol.Schema:
+        zones = [
+            {"value": sub.data[CONF_ZONE_ID], "label": sub.title}
+            for sub in _subentries(self._get_entry(), SUBENTRY_ZONE)
+        ]
+        sensors = data.get(CONF_SENSORS) or []
+        return vol.Schema({
+            vol.Required(CONF_ZONE, default=data.get(CONF_ZONE_ID) or zones[0]["value"]): selector.SelectSelector(
+                selector.SelectSelectorConfig(options=zones, mode=selector.SelectSelectorMode.DROPDOWN)
+            ),
+            vol.Required(CONF_NAME, default=data.get(CONF_NAME, "")): str,
+            vol.Optional(CONF_TRVS, default=list(data.get(CONF_TRVS) or [])): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="climate", multiple=True)
+            ),
+            vol.Optional(CONF_SENSORS, default=[s["temperature"] for s in sensors]): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", device_class="temperature", multiple=True)
+            ),
+            vol.Optional(
+                CONF_TEMPERATURE_OFFSET, default=data.get(CONF_TEMPERATURE_OFFSET, 0.0)
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=-5, max=5, step=0.5, unit_of_measurement="°C", mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Required(CONF_ADVANCED): section(
+                vol.Schema({
+                    vol.Optional(CONF_LAST_SEEN, default=[
+                        {"temperature": s["temperature"], CONF_LAST_SEEN: s[CONF_LAST_SEEN]}
+                        for s in sensors if s.get(CONF_LAST_SEEN)
+                    ]): LAST_SEEN_SELECTOR,
+                }),
+                {"collapsed": not any(s.get(CONF_LAST_SEEN) for s in sensors)},
+            ),
+        })
+
+    def _validate(
+        self, user_input: dict, room_id: str | None
+    ) -> tuple[dict | None, dict[str, str], dict[str, str]]:
+        entry = self._get_entry()
+        errors: dict[str, str] = {}
+        placeholders = {"trv_conflict": ""}
+        name = user_input.get(CONF_NAME, "").strip()
+        zone_id = user_input.get(CONF_ZONE)
+        trvs = list(user_input.get(CONF_TRVS) or [])
+        sensor_ids = list(user_input.get(CONF_SENSORS) or [])
+        if not name:
+            errors[CONF_NAME] = "name_required"
+        if zone_id not in {sub.data[CONF_ZONE_ID] for sub in _subentries(entry, SUBENTRY_ZONE)}:
+            errors[CONF_ZONE] = "zone_missing"
+        if not trvs and not sensor_ids:
+            errors["base"] = "room_empty"
+        conflicts = []
+        for room in _subentries(entry, SUBENTRY_ROOM):
+            if room.data.get(CONF_ROOM_ID) == room_id:
+                continue
+            for trv in trvs:
+                if trv in room.data.get(CONF_TRVS, []):
+                    conflicts.append(f"{trv} ({room.title})")
+        if conflicts:
+            errors[CONF_TRVS] = "trv_in_use"
+            placeholders["trv_conflict"] = ", ".join(conflicts)
+        if errors:
+            return None, errors, placeholders
+
+        last_seen = {
+            item.get("temperature"): item.get(CONF_LAST_SEEN)
+            for item in (user_input.get(CONF_ADVANCED) or {}).get(CONF_LAST_SEEN) or []
+        }
+        data: dict[str, Any] = {
+            CONF_ROOM_ID: room_id,
+            CONF_ZONE_ID: zone_id,
+            CONF_NAME: name,
+            CONF_TRVS: trvs,
+            CONF_SENSORS: [
+                {"temperature": sid, **({CONF_LAST_SEEN: last_seen[sid]} if last_seen.get(sid) else {})}
+                for sid in sensor_ids
+            ],
+        }
+        offset = float(user_input.get(CONF_TEMPERATURE_OFFSET) or 0.0)
+        if offset:
+            data[CONF_TEMPERATURE_OFFSET] = offset
+        return data, errors, placeholders
+
+    def _zone_name(self, zone_id: str) -> str:
+        for sub in _subentries(self._get_entry(), SUBENTRY_ZONE):
+            if sub.data[CONF_ZONE_ID] == zone_id:
+                return sub.title
+        return zone_id
+
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        entry = self._get_entry()
+        if not _subentries(entry, SUBENTRY_ZONE):
+            return self.async_abort(reason="no_zones")
+        defaults: dict[str, Any] = {}
+        errors: dict[str, str] = {}
+        placeholders = {"trv_conflict": ""}
+        if user_input is not None:
+            taken = {sub.data.get(CONF_ROOM_ID) for sub in _subentries(entry, SUBENTRY_ROOM)}
+            room_id = unique_id_for(user_input.get(CONF_NAME, "").strip(), taken, "room")
+            data, errors, placeholders = self._validate(user_input, room_id)
+            if data is not None:
+                return self.async_create_entry(
+                    title=room_title(data[CONF_NAME], self._zone_name(data[CONF_ZONE_ID])),
+                    data=data,
+                    unique_id=room_id,
+                )
+            defaults = self._form_defaults(user_input)
+        return self.async_show_form(
+            step_id="user", data_schema=self._schema(defaults), errors=errors,
+            description_placeholders=placeholders,
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        entry = self._get_entry()
+        subentry = self._get_reconfigure_subentry()
+        room_id = subentry.data[CONF_ROOM_ID]
+        defaults = dict(subentry.data)
+        errors: dict[str, str] = {}
+        placeholders = {"trv_conflict": ""}
+        if user_input is not None:
+            data, errors, placeholders = self._validate(user_input, room_id)
+            if data is not None:
+                # Keep migration bookkeeping (previous ids) so entity ids stay put
+                for key in ("previous_room_id", "previous_zone_id"):
+                    if key in subentry.data:
+                        data[key] = subentry.data[key]
+                return self.async_update_and_abort(
+                    entry, subentry,
+                    title=room_title(data[CONF_NAME], self._zone_name(data[CONF_ZONE_ID])),
+                    data=data,
+                )
+            defaults = self._form_defaults(user_input)
+        return self.async_show_form(
+            step_id="reconfigure", data_schema=self._schema(defaults), errors=errors,
+            description_placeholders=placeholders,
+        )
+
+    @staticmethod
+    def _form_defaults(user_input: dict) -> dict:
+        last_seen = {
+            i.get("temperature"): i.get(CONF_LAST_SEEN)
+            for i in (user_input.get(CONF_ADVANCED) or {}).get(CONF_LAST_SEEN) or []
+        }
+        return {
+            CONF_ZONE_ID: user_input.get(CONF_ZONE),
+            CONF_NAME: user_input.get(CONF_NAME, ""),
+            CONF_TRVS: user_input.get(CONF_TRVS) or [],
+            CONF_SENSORS: [
+                {"temperature": s, **({CONF_LAST_SEEN: last_seen[s]} if last_seen.get(s) else {})}
+                for s in user_input.get(CONF_SENSORS) or []
+            ],
+            CONF_TEMPERATURE_OFFSET: user_input.get(CONF_TEMPERATURE_OFFSET, 0.0),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Configure: settings and import
+# ---------------------------------------------------------------------------
+
+class HeatingManagerOptionsFlow(OptionsFlow):
+    """Settings (one form in sections) and Import from YAML file."""
+
+    def __init__(self) -> None:
+        self._pending_import: dict[str, Any] | None = None
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        return self.async_show_menu(step_id="init", menu_options=["settings", "import_yaml"])
+
+    def _current_settings(self) -> dict[str, Any]:
+        settings = default_settings()
+        settings.update(self.config_entry.options.get(OPT_SETTINGS) or {})
+        return settings
+
+    async def async_step_settings(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        current = self._current_settings()
+        if user_input is not None:
+            for section_key, keys, _ in SETTINGS_SECTIONS:
+                for key in keys:
+                    if key in (user_input.get(section_key) or {}):
+                        current[key] = coerce_setting(SETTINGS_BY_KEY[key], user_input[section_key][key])
+            return self.async_create_entry(data={**self.config_entry.options, OPT_SETTINGS: current})
+        schema = {
+            vol.Required(section_key): section(
+                vol.Schema({
+                    vol.Required(key, default=current[key]): _setting_selector(SETTINGS_BY_KEY[key])
+                    for key in keys
+                }),
+                {"collapsed": collapsed},
+            )
+            for section_key, keys, collapsed in SETTINGS_SECTIONS
+        }
+        return self.async_show_form(step_id="settings", data_schema=vol.Schema(schema))
+
+    # -- import from YAML ------------------------------------------------------
 
     def _load_yaml(self, path: str) -> tuple[dict | None, str | None, str]:
         """Read a heating_manager.yaml style file. Returns (content, error, full path)."""
@@ -249,31 +663,47 @@ class HeatingManagerOptionsFlow(OptionsFlow):
     async def async_step_import_yaml_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        entry = self.config_entry
         pending = self._pending_import
+        existing_zones = entry_to_runtime(entry)[0]["zones"]
+
         if user_input is not None:
-            if user_input.get(CONF_CONFIRM):
-                self._zones.update(pending[OPT_ZONES])
-                self.options[OPT_SETTINGS].update(pending[OPT_SETTINGS])
             self._pending_import = None
-            return await self.async_step_init()
+            if not user_input.get(CONF_CONFIRM):
+                return await self.async_step_init()
+            self._apply_import(pending[OPT_ZONES])
+            settings = {**self._current_settings(), **pending[OPT_SETTINGS]}
+            return self.async_create_entry(data={**entry.options, OPT_SETTINGS: settings})
 
         zone_lines = []
         for zone_id, zone in pending[OPT_ZONES].items():
             rooms = len(zone.get(CONF_ROOMS, {}))
             periods = sum(len(p) for p in zone.get(CONF_SCHEDULE, {}).values())
-            replaces = " (replaces the existing zone)" if zone_id in self._zones else ""
+            replaces = " (replaces the existing zone)" if zone_id in existing_zones else ""
             zone_lines.append(
                 f"- {zone.get(CONF_NAME, zone_id)}: {rooms} room(s), "
                 f"{periods} schedule period(s){replaces}"
             )
-        merged = copy.deepcopy(self._zones)
+        merged = copy.deepcopy(existing_zones)
         merged.update(copy.deepcopy(pending[OPT_ZONES]))
         duplicates = dedupe_trvs(merged)
-        warnings = (
-            "TRVs in more than one room (each will only control the first):\n"
-            + "\n".join(f"- {d}" for d in duplicates)
-            if duplicates else ""
-        )
+        warning_blocks = []
+        if duplicates:
+            warning_blocks.append(
+                "TRVs in more than one room (each will only control the first):\n"
+                + "\n".join(f"- {d}" for d in duplicates)
+            )
+        overlaps = [
+            problem
+            for zone_id, zone in pending[OPT_ZONES].items()
+            for problem in schedule_overlaps(zone.get(CONF_NAME, zone_id), zone.get(CONF_SCHEDULE, {}))
+        ]
+        if overlaps:
+            warning_blocks.append(
+                "Schedule periods that overlap (fix them in the zone after importing):\n"
+                + "\n".join(f"- {o}" for o in overlaps)
+            )
+        warnings = "\n\n".join(warning_blocks)
         return self.async_show_form(
             step_id="import_yaml_confirm",
             data_schema=vol.Schema({vol.Required(CONF_CONFIRM, default=True): bool}),
@@ -285,336 +715,18 @@ class HeatingManagerOptionsFlow(OptionsFlow):
             },
         )
 
-    # -- settings ----------------------------------------------------------
-
-    async def _settings_step(
-        self, step_id: str, advanced: bool, user_input: dict[str, Any] | None
-    ) -> ConfigFlowResult:
-        specs = [spec for spec in SETTINGS if spec.advanced == advanced]
-        current = self.options[OPT_SETTINGS]
-        if user_input is not None:
-            for spec in specs:
-                if spec.key in user_input:
-                    current[spec.key] = coerce_setting(spec, user_input[spec.key])
-            return await self.async_step_init()
-        schema = vol.Schema({
-            vol.Required(spec.key, default=current.get(spec.key, spec.default)): _setting_selector(spec)
-            for spec in specs
-        })
-        return self.async_show_form(step_id=step_id, data_schema=schema)
-
-    async def async_step_settings(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        return await self._settings_step("settings", False, user_input)
-
-    async def async_step_advanced(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        return await self._settings_step("advanced", True, user_input)
-
-    # -- zones -------------------------------------------------------------
-
-    async def async_step_zones(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        if user_input is not None:
-            choice = user_input[CONF_ZONE]
-            if choice == SAVE:
-                return await self.async_step_save()
-            if choice == BACK:
-                return await self.async_step_init()
-            if choice == ADD:
-                self._zone_id = None
-                return await self.async_step_zone_edit()
-            self._zone_id = choice
-            return await self.async_step_zone()
-        choices = [{"value": zid, "label": z.get(CONF_NAME, zid)} for zid, z in self._zones.items()]
-        choices += [
-            {"value": ADD, "label": "➕ Add a zone"},
-            {"value": BACK, "label": "↩ Back"},
-        ]
-        return self.async_show_form(
-            step_id="zones", data_schema=vol.Schema({vol.Required(CONF_ZONE): _choice(choices)})
-        )
-
-    async def async_step_zone(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        return self.async_show_menu(
-            step_id="zone",
-            menu_options=["rooms", "schedule", "zone_edit", "zone_delete", "zones", "save"],
-            description_placeholders={"zone": self._zone.get(CONF_NAME, self._zone_id)},
-        )
-
-    async def async_step_zone_edit(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        errors: dict[str, str] = {}
-        zone = self._zone if self._zone_id else None
-        if user_input is not None:
-            name = user_input[CONF_NAME].strip()
-            if not name:
-                errors[CONF_NAME] = "name_required"
-            else:
-                if zone is None:
-                    self._zone_id = unique_id_for(name, self._zones, "zone")
-                    zone = self._zones[self._zone_id] = new_zone(name)
-                zone[CONF_NAME] = name
-                mode = user_input[CONF_HEATING_DEMAND_MODE]
-                if mode == GLOBAL:
-                    zone.pop(CONF_HEATING_DEMAND_MODE, None)
-                else:
-                    zone[CONF_HEATING_DEMAND_MODE] = mode
-                if user_input.get(CONF_MONITORING_ONLY):
-                    zone[CONF_MONITORING_ONLY] = True
-                else:
-                    zone.pop(CONF_MONITORING_ONLY, None)
-                return await self.async_step_zone()
-        schema = vol.Schema({
-            vol.Required(CONF_NAME, default=zone.get(CONF_NAME, "") if zone else ""): str,
-            vol.Required(
-                CONF_HEATING_DEMAND_MODE,
-                default=(zone or {}).get(CONF_HEATING_DEMAND_MODE, GLOBAL),
-            ): selector.SelectSelector(
-                selector.SelectSelectorConfig(
-                    options=[GLOBAL, *HEATING_DEMAND_MODES],
-                    mode=selector.SelectSelectorMode.DROPDOWN,
-                    translation_key="zone_heating_demand_mode",
-                )
-            ),
-            vol.Optional(
-                CONF_MONITORING_ONLY, default=(zone or {}).get(CONF_MONITORING_ONLY, False)
-            ): bool,
-        })
-        return self.async_show_form(step_id="zone_edit", data_schema=schema, errors=errors)
-
-    async def async_step_zone_delete(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        if user_input is not None:
-            if user_input.get(CONF_CONFIRM):
-                del self._zones[self._zone_id]
-                self._zone_id = None
-                return await self.async_step_zones()
-            return await self.async_step_zone()
-        return self.async_show_form(
-            step_id="zone_delete",
-            data_schema=vol.Schema({vol.Required(CONF_CONFIRM, default=False): bool}),
-            description_placeholders={"zone": self._zone.get(CONF_NAME, self._zone_id)},
-        )
-
-    # -- rooms -------------------------------------------------------------
-
-    async def async_step_rooms(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        rooms = self._zone[CONF_ROOMS]
-        if user_input is not None:
-            choice = user_input[CONF_ROOM]
-            if choice == SAVE:
-                return await self.async_step_save()
-            if choice == BACK:
-                return await self.async_step_zone()
-            self._room_id = None if choice == ADD else choice
-            return await self.async_step_room()
-        choices = [{"value": rid, "label": r.get(CONF_NAME, rid)} for rid, r in rooms.items()]
-        choices += [
-            {"value": ADD, "label": "➕ Add a room"},
-            {"value": BACK, "label": "↩ Back"},
-        ]
-        return self.async_show_form(
-            step_id="rooms",
-            data_schema=vol.Schema({vol.Required(CONF_ROOM): _choice(choices)}),
-            description_placeholders={"zone": self._zone.get(CONF_NAME, self._zone_id)},
-        )
-
-    async def async_step_room(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        rooms = self._zone[CONF_ROOMS]
-        room = rooms.get(self._room_id) if self._room_id else None
-        errors: dict[str, str] = {}
-        placeholders = {"zone": self._zone.get(CONF_NAME, self._zone_id), "trv_conflict": ""}
-        if user_input is not None:
-            if room is not None and user_input.get(CONF_DELETE):
-                del rooms[self._room_id]
-                self._room_id = None
-                return await self.async_step_rooms()
-            name = user_input[CONF_NAME].strip()
-            trvs = list(user_input.get(CONF_TRVS) or [])
-            sensor_ids = list(user_input.get(CONF_SENSORS) or [])
-            if not name:
-                errors[CONF_NAME] = "name_required"
-            elif not trvs and not sensor_ids:
-                errors["base"] = "room_empty"
-            elif conflicts := [
-                (trv_id, owner)
-                for trv_id in trvs
-                if (owner := trv_owner(self._zones, trv_id, (self._zone_id, self._room_id)))
-            ]:
-                errors[CONF_TRVS] = "trv_in_use"
-                placeholders["trv_conflict"] = ", ".join(
-                    f"{trv_id} ({room_label(self._zones, *owner)})" for trv_id, owner in conflicts
-                )
-            else:
-                if room is None:
-                    # "zone" is reserved: the zone entity's unique id ends in "_zone"
-                    self._room_id = unique_id_for(name, {*rooms, "zone"}, "room")
-                    room = rooms[self._room_id] = {}
-                old_last_seen = {
-                    s["temperature"]: s.get("last_seen") for s in room.get(CONF_SENSORS, [])
-                }
-                room[CONF_NAME] = name
-                room[CONF_TRVS] = trvs
-                room[CONF_SENSORS] = [
-                    {"temperature": sid, **({"last_seen": old_last_seen[sid]} if old_last_seen.get(sid) else {})}
-                    for sid in sensor_ids
-                ]
-                offset = float(user_input.get(CONF_TEMPERATURE_OFFSET) or 0.0)
-                if offset:
-                    room[CONF_TEMPERATURE_OFFSET] = offset
-                else:
-                    room.pop(CONF_TEMPERATURE_OFFSET, None)
-                if user_input.get(CONF_LAST_SEEN) and sensor_ids:
-                    return await self.async_step_room_last_seen()
-                return await self.async_step_rooms()
-
-        room = room or {}
-        fields: dict[Any, Any] = {
-            vol.Required(CONF_NAME, default=room.get(CONF_NAME, "")): str,
-            vol.Optional(CONF_TRVS, default=room.get(CONF_TRVS, [])): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="climate", multiple=True)
-            ),
-            vol.Optional(
-                CONF_SENSORS, default=[s["temperature"] for s in room.get(CONF_SENSORS, [])]
-            ): selector.EntitySelector(
-                selector.EntitySelectorConfig(
-                    domain="sensor", device_class="temperature", multiple=True
-                )
-            ),
-            vol.Optional(
-                CONF_TEMPERATURE_OFFSET, default=room.get(CONF_TEMPERATURE_OFFSET, 0.0)
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=-5, max=5, step=0.5, unit_of_measurement="°C",
-                    mode=selector.NumberSelectorMode.BOX,
-                )
-            ),
-            vol.Optional(CONF_LAST_SEEN, default=False): bool,
+    def _apply_import(self, zones: dict[str, dict]) -> None:
+        """Add the imported zones as subentries, replacing zones with the same id and their rooms."""
+        entry = self.config_entry
+        config_entries = self.hass.config_entries
+        # Rooms first, then zones (removing a zone can start a reload that clears its rooms)
+        replaced = [sub for sub in entry.subentries.values() if sub.data.get(CONF_ZONE_ID) in zones]
+        replaced.sort(key=lambda sub: sub.subentry_type == SUBENTRY_ZONE)
+        for sub in replaced:
+            if sub.subentry_id in entry.subentries:
+                config_entries.async_remove_subentry(entry, sub.subentry_id)
+        taken = {
+            sub.data.get(CONF_ROOM_ID) for sub in entry.subentries.values() if sub.subentry_type == SUBENTRY_ROOM
         }
-        if self._room_id:
-            fields[vol.Optional(CONF_DELETE, default=False)] = bool
-        return self.async_show_form(
-            step_id="room",
-            data_schema=vol.Schema(fields),
-            errors=errors,
-            description_placeholders=placeholders,
-        )
-
-    async def async_step_room_last_seen(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Optionally map each temperature sensor to a 'last seen' timestamp sensor."""
-        room = self._zone[CONF_ROOMS][self._room_id]
-        if user_input is not None:
-            for sensor in room[CONF_SENSORS]:
-                last_seen = user_input.get(sensor["temperature"])
-                if last_seen:
-                    sensor["last_seen"] = last_seen
-                else:
-                    sensor.pop("last_seen", None)
-            return await self.async_step_rooms()
-        fields = {}
-        for sensor in room[CONF_SENSORS]:
-            key = vol.Optional(
-                sensor["temperature"],
-                description={"suggested_value": sensor.get("last_seen")},
-            )
-            fields[key] = selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor"))
-        return self.async_show_form(
-            step_id="room_last_seen",
-            data_schema=vol.Schema(fields),
-            description_placeholders={"room": room.get(CONF_NAME, self._room_id)},
-        )
-
-    # -- schedule ----------------------------------------------------------
-
-    def _periods(self) -> list[dict]:
-        schedule = self._zone.setdefault(CONF_SCHEDULE, {})
-        return schedule.setdefault(self._day, [])
-
-    async def async_step_schedule(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        if user_input is not None:
-            if user_input[CONF_DAY] == BACK:
-                return await self.async_step_zone()
-            self._day = user_input[CONF_DAY]
-            return await self.async_step_schedule_day()
-        return self.async_show_form(
-            step_id="schedule",
-            data_schema=vol.Schema({
-                vol.Required(CONF_DAY, default=CONF_WEEKDAY): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[CONF_WEEKDAY, CONF_WEEKEND, BACK],
-                        mode=selector.SelectSelectorMode.LIST,
-                        translation_key="schedule_day",
-                    )
-                )
-            }),
-            description_placeholders={"zone": self._zone.get(CONF_NAME, self._zone_id)},
-        )
-
-    async def async_step_schedule_day(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        periods = self._periods()
-        other = CONF_WEEKEND if self._day == CONF_WEEKDAY else CONF_WEEKDAY
-        if user_input is not None:
-            choice = user_input[CONF_PERIOD]
-            if choice == SAVE:
-                return await self.async_step_save()
-            if choice == BACK:
-                return await self.async_step_schedule()
-            if choice == COPY:
-                source = self._zone.get(CONF_SCHEDULE, {}).get(other, [])
-                periods[:] = copy.deepcopy(source)
-                return await self.async_step_schedule_day()
-            self._period_index = None if choice == ADD else int(choice)
-            return await self.async_step_period()
-        choices = [{"value": str(i), "label": format_period(p)} for i, p in enumerate(periods)]
-        choices += [
-            {"value": ADD, "label": "➕ Add a period"},
-            {"value": COPY, "label": f"⧉ Replace with the {other} schedule"},
-            {"value": BACK, "label": "↩ Back"},
-        ]
-        return self.async_show_form(
-            step_id="schedule_day",
-            data_schema=vol.Schema({vol.Required(CONF_PERIOD): _choice(choices)}),
-            description_placeholders={
-                "zone": self._zone.get(CONF_NAME, self._zone_id),
-                "day": self._day,
-            },
-        )
-
-    async def async_step_period(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        periods = self._periods()
-        existing = periods[self._period_index] if self._period_index is not None else None
-        errors: dict[str, str] = {}
-        if user_input is not None:
-            if existing is not None and user_input.get(CONF_DELETE):
-                periods.pop(self._period_index)
-                return await self.async_step_schedule_day()
-            start, end = parse_time(user_input[CONF_START]), parse_time(user_input[CONF_END])
-            if start is None or end is None:
-                errors["base"] = "invalid_time"
-            else:
-                period = {
-                    CONF_START: format_time(start % 1440),
-                    CONF_END: format_time(end % 1440),
-                    CONF_TEMPERATURE: float(user_input[CONF_TEMPERATURE]),
-                }
-                others = [p for i, p in enumerate(periods) if i != self._period_index]
-                if any(period_minutes(period) & period_minutes(p) for p in others):
-                    errors["base"] = "overlap"
-                else:
-                    periods[:] = sort_periods([*others, period])
-                    return await self.async_step_schedule_day()
-
-        defaults = existing or {CONF_START: "06:30", CONF_END: "22:00", CONF_TEMPERATURE: 19.0}
-        if user_input is not None:
-            defaults = {**defaults, **{k: user_input[k] for k in (CONF_START, CONF_END, CONF_TEMPERATURE) if k in user_input}}
-        fields: dict[Any, Any] = {
-            vol.Required(CONF_START, default=defaults[CONF_START]): selector.TimeSelector(),
-            vol.Required(CONF_END, default=defaults[CONF_END]): selector.TimeSelector(),
-            vol.Required(CONF_TEMPERATURE, default=defaults[CONF_TEMPERATURE]): TEMPERATURE_SELECTOR,
-        }
-        if existing is not None:
-            fields[vol.Optional(CONF_DELETE, default=False)] = bool
-        return self.async_show_form(
-            step_id="period", data_schema=vol.Schema(fields), errors=errors,
-            description_placeholders={"day": self._day},
-        )
+        for data in zones_to_subentries(zones, taken_room_ids=taken):
+            config_entries.async_add_subentry(entry, ConfigSubentry(**data))
