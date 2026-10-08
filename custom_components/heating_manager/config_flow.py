@@ -18,6 +18,7 @@ from homeassistant.helpers import selector
 from .const import (
     CONF_END,
     CONF_HEATING_DEMAND_MODE,
+    CONF_MONITORING_ONLY,
     CONF_ROOMS,
     CONF_SCHEDULE,
     CONF_SENSORS,
@@ -240,6 +241,10 @@ class HeatingManagerOptionsFlow(OptionsFlow):
                     zone.pop(CONF_HEATING_DEMAND_MODE, None)
                 else:
                     zone[CONF_HEATING_DEMAND_MODE] = mode
+                if user_input.get(CONF_MONITORING_ONLY):
+                    zone[CONF_MONITORING_ONLY] = True
+                else:
+                    zone.pop(CONF_MONITORING_ONLY, None)
                 return await self.async_step_zone()
         schema = vol.Schema({
             vol.Required(CONF_NAME, default=zone.get(CONF_NAME, "") if zone else ""): str,
@@ -253,6 +258,9 @@ class HeatingManagerOptionsFlow(OptionsFlow):
                     translation_key="zone_heating_demand_mode",
                 )
             ),
+            vol.Optional(
+                CONF_MONITORING_ONLY, default=(zone or {}).get(CONF_MONITORING_ONLY, False)
+            ): bool,
         })
         return self.async_show_form(step_id="zone_edit", data_schema=schema, errors=errors)
 

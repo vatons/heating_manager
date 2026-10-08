@@ -63,7 +63,7 @@ Everything is set up in the Home Assistant UI; no YAML is needed.
    - **Zones, rooms and schedules**: pick a zone (or add one), then
      - **Rooms**: add a room, pick its TRVs and temperature sensors, and optionally set a temperature offset
      - **Schedule**: choose weekdays or weekends, then add, edit or delete periods (start, end, temperature). "Replace with the weekday/weekend schedule" copies one to the other
-     - **Name and heating demand mode**: rename the zone, or override the default demand mode for it
+     - **Name, demand mode and monitoring**: rename the zone, override the default demand mode for it, or make it **monitoring only**
    - **Settings**: the everyday options (temperature outside the schedule, away temperature, demand mode, sensor fallback, deadband, boost duration)
    - **Advanced settings**: TRV control tuning, analytics and update interval. The defaults suit most homes
 4. Choose **Save and close** (available on the main menu, each zone's menu and every list) to apply your changes. Closing the dialog without saving discards them.
@@ -235,6 +235,14 @@ The zone climate entity attributes include:
 - `schedule.current_temperature` - Currently scheduled target temperature
 - `schedule.current_period` - Current schedule period (`start`, `end`, `temperature`)
 - `schedule.next_period` - Next schedule period
+
+#### Monitoring-only zones
+
+A zone can be set to **monitoring only** (**Configure → Zones, rooms and schedules → (zone) → Name, demand mode and monitoring**). Use this for rooms you want to see but not heat, such as a bathroom or cloakroom with sensors but no controllable radiators. A monitoring-only zone:
+
+- Still shows each room's temperature, target, sensor status and analytics
+- Never calls for heat: its zone entity always reports `idle`, and it is left out of the global entity's demand and averages, so it can't switch the boiler on
+- Never sends commands to TRVs in its rooms
 
 ### Global Heating Demand
 

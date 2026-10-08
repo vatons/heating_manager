@@ -88,20 +88,22 @@
         "menu_options": {
           "rooms": "Rooms",
           "schedule": "Schedule",
-          "zone_edit": "Name and heating demand mode",
+          "zone_edit": "Name, demand mode and monitoring",
           "zone_delete": "Delete this zone",
           "zones": "Back to zones",
           "save": "Save and close"
         }
       },
       "zone_edit": {
-        "title": "Zone",
+        "title": "Zone settings",
         "data": {
           "name": "Name",
-          "heating_demand_mode": "Heating demand mode"
+          "heating_demand_mode": "Heating demand mode",
+          "monitoring_only": "Monitoring only"
         },
         "data_description": {
-          "heating_demand_mode": "When this zone calls for heat. Its climate entity shows 'heating' then, for driving a boiler automation."
+          "heating_demand_mode": "When this zone calls for heat. Its climate entity shows 'heating' then, for driving a boiler automation.",
+          "monitoring_only": "Show this zone's room temperatures without heating: it never calls for heat (so it can't switch the boiler on) and its TRVs, if any, are left alone."
         }
       },
       "zone_delete": {

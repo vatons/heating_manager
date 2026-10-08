@@ -12,6 +12,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_HEATING_DEMAND_MODE,
+    CONF_MONITORING_ONLY,
     CONF_ROOMS,
     CONF_SCHEDULE,
     CONF_TEMPERATURE_OFFSET,
@@ -166,6 +167,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     "schedule": zone_config.get(CONF_SCHEDULE, {}),
                     "name": zone_config.get("name", zone_id),
                     "heating_demand": False,
+                    "monitoring_only": bool(zone_config.get(CONF_MONITORING_ONLY, False)),
                 }
 
                 rooms = zone_config.get(CONF_ROOMS, {})
@@ -264,7 +266,10 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                         zone_id, room_id, room_temp, target_temp
                     )
 
-                    if room_off:
+                    if zone_data["monitoring_only"]:
+                        # Monitoring-only zone: report temperatures, never heat or touch TRVs
+                        needs_heating = False
+                    elif room_off:
                         # Switched off by the user: hold TRVs at minimum and never demand heat
                         needs_heating = False
                         for trv_id in room_config.get("trvs", []):
@@ -330,9 +335,12 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 zone_demand_mode = zone_config.get(
                     CONF_HEATING_DEMAND_MODE, self.heating_demand_mode
                 )
-                zone_data["heating_demand"] = self.heating_logic.calculate_zone_heating_demand(
-                    zone_data["rooms"], zone_demand_mode, zone_id=zone_id
-                )
+                if zone_data["monitoring_only"]:
+                    zone_data["heating_demand"] = False
+                else:
+                    zone_data["heating_demand"] = self.heating_logic.calculate_zone_heating_demand(
+                        zone_data["rooms"], zone_demand_mode, zone_id=zone_id
+                    )
                 zone_data["heating_demand_mode"] = zone_demand_mode
                 zone_data["manual_zone_override"] = {
                     "active": zone_id in self.manual_zone_temp,

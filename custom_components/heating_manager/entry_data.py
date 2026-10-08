@@ -8,6 +8,7 @@ Everything the integration needs is stored in the config entry's options:
             zone_id: {
                 "name": str,
                 "heating_demand_mode": str,          # optional per-zone override
+                "monitoring_only": bool,             # optional: report only, never heat
                 "schedule": {"weekday": [period, ...], "weekend": [period, ...]},
                 "rooms": {
                     room_id: {
@@ -44,6 +45,7 @@ from .const import (
     CONF_HEATING_DEADBAND,
     CONF_HEATING_DEMAND_MODE,
     CONF_MINIMUM_TEMP,
+    CONF_MONITORING_ONLY,
     CONF_ROOMS,
     CONF_SCHEDULE,
     CONF_SENSORS,
@@ -282,6 +284,8 @@ def yaml_to_options(heating_config: dict, conf: dict | None = None) -> dict[str,
         }
         if zone.get(CONF_HEATING_DEMAND_MODE) in HEATING_DEMAND_MODES:
             zone_options[CONF_HEATING_DEMAND_MODE] = zone[CONF_HEATING_DEMAND_MODE]
+        if zone.get(CONF_MONITORING_ONLY) is True:
+            zone_options[CONF_MONITORING_ONLY] = True
         rooms = zone.get(CONF_ROOMS) or {}
         if isinstance(rooms, dict):
             for room_id, room in rooms.items():

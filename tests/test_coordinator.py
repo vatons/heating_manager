@@ -546,3 +546,59 @@ async def test_offset_not_learned_from_fallback_temperature(hass, add_trvs, make
         await refresh(coordinator)
     assert room_data(coordinator)["temperature_source"] == "zone_average"
     assert coordinator.trv_controller._get_ema_offset("zone_1", "room", TRV) == pytest.approx(3.0)
+
+
+# ---------------------------------------------------------------------------
+# Monitoring-only zones
+# ---------------------------------------------------------------------------
+
+async def test_monitoring_only_zone_reports_but_never_heats(hass, add_trvs, make_coordinator):
+    trvs = await add_trvs(FakeTRV("room_trv", current_temperature=12.0, target_temperature=8.0))
+    set_temp(hass, SENSOR, 12.0)
+    set_temp(hass, "sensor.cloak", 9.0)
+    cfg = single_room_config()
+    cfg["zones"]["zone_1"]["monitoring_only"] = True
+    cfg["zones"]["zone_1"]["rooms"]["cloak"] = make_room("Cloakroom", sensors=["sensor.cloak"])
+    coordinator = make_coordinator(cfg)
+    await refresh(coordinator)
+
+    zone = coordinator.data["zone_1"]
+    assert zone["monitoring_only"] is True
+    assert zone["heating_demand"] is False
+    for room_id, temp in (("room", 12.0), ("cloak", 9.0)):
+        data = room_data(coordinator, room_id)
+        assert data["temperature"] == temp
+        assert data["target_temperature"] == 19.0
+        assert data["needs_heating"] is False
+        assert data["heating_analytics"]["samples_count"] == 1
+    # TRVs in a monitoring zone are left exactly as they are
+    assert trvs[TRV].set_temperature_calls == []
+    assert trvs[TRV].target_temperature == 8.0
+
+
+async def test_monitoring_only_zone_does_not_affect_other_zones(hass, add_trvs, make_coordinator):
+    await add_trvs(FakeTRV("room_trv", current_temperature=19.5))
+    set_temp(hass, SENSOR, 19.5)
+    set_temp(hass, "sensor.cloak", 5.0)
+    cfg = single_room_config()
+    cfg["zones"]["zone_3"] = {
+        "name": "Zone 3", "monitoring_only": True, "schedule": ALL_DAY_19,
+        "rooms": {"cloak": make_room("Cloakroom", sensors=["sensor.cloak"])},
+    }
+    coordinator = make_coordinator(cfg)
+    await refresh(coordinator)
+    assert coordinator.data["zone_1"]["heating_demand"] is False
+    assert coordinator.data["zone_3"]["heating_demand"] is False
+    assert coordinator.data["zone_1"]["monitoring_only"] is False
+
+
+async def test_monitoring_only_survives_boost(hass, add_trvs, make_coordinator):
+    """Even a boosted room in a monitoring zone must not call for heat."""
+    await add_trvs(FakeTRV("room_trv"))
+    set_temp(hass, SENSOR, 15.0)
+    cfg = single_room_config()
+    cfg["zones"]["zone_1"]["monitoring_only"] = True
+    coordinator = make_coordinator(cfg)
+    await coordinator.set_boost("zone_1", "room", temperature=25.0)
+    await refresh(coordinator)
+    assert coordinator.data["zone_1"]["heating_demand"] is False
