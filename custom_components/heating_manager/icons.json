@@ -1,0 +1,68 @@
+{
+  "entity": {
+    "climate": {
+      "room": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "schedule": "mdi:calendar-clock",
+              "away": "mdi:home-export-outline",
+              "boost": "mdi:rocket-launch"
+            }
+          }
+        }
+      },
+      "zone": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "schedule": "mdi:calendar-clock",
+              "away": "mdi:home-export-outline",
+              "boost": "mdi:rocket-launch"
+            }
+          }
+        }
+      },
+      "global": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "schedule": "mdi:calendar-clock",
+              "away": "mdi:home-export-outline",
+              "boost": "mdi:rocket-launch"
+            }
+          }
+        }
+      }
+    },
+    "sensor": {
+      "boost_end": {
+        "default": "mdi:timer-outline"
+      }
+    },
+    "button": {
+      "boost": {
+        "default": "mdi:rocket-launch"
+      },
+      "cancel_boost": {
+        "default": "mdi:rocket-launch-outline"
+      }
+    },
+    "number": {
+      "boost_duration": {
+        "default": "mdi:timer-cog-outline"
+      }
+    }
+  },
+  "services": {
+    "set_boost": {
+      "service": "mdi:rocket-launch"
+    },
+    "clear_boost": {
+      "service": "mdi:rocket-launch-outline"
+    },
+    "set_mode": {
+      "service": "mdi:home-export-outline"
+    }
+  }
+}

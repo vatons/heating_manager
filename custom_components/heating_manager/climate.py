@@ -93,10 +93,13 @@ async def async_setup_entry(
 def _async_remove_stale_entities(
     hass: HomeAssistant, entry: ConfigEntry, unique_ids: set[str | None]
 ) -> None:
-    """Remove entities and devices for zones/rooms deleted in the Configure menu."""
+    """Remove climate entities and devices for zones/rooms deleted in the Configure menu.
+
+    The other platforms remove their own entities (see entity.py).
+    """
     ent_reg = er.async_get(hass)
     for entity in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
-        if entity.unique_id not in unique_ids:
+        if entity.domain == "climate" and entity.unique_id not in unique_ids:
             ent_reg.async_remove(entity.entity_id)
 
     dev_reg = dr.async_get(hass)
@@ -186,6 +189,7 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
     )
     _attr_preset_modes = ["schedule", "away", "boost"]
+    _attr_translation_key = "room"
 
     def __init__(
         self,
@@ -486,6 +490,7 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
         ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
     )
     _attr_preset_modes = ["schedule", "away", "boost"]
+    _attr_translation_key = "zone"
 
     def __init__(
         self,
@@ -727,6 +732,7 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
         ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
     )
     _attr_preset_modes = ["schedule", "away", "boost"]
+    _attr_translation_key = "global"
 
     def __init__(
         self,

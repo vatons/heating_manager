@@ -142,6 +142,8 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         self._loaded_state = False
         self._zone_heating_start: dict[str, Any] = {}  # zone_id -> datetime when demand started
         self.rooms_off: dict[str, list[str]] = {}  # zone_id -> room_ids switched off by the user
+        # zone_id -> room_id -> boost minutes, set on the room's boost duration entity
+        self.boost_durations: dict[str, dict[str, int]] = {}
         self._missing_since: dict[str, datetime] = {}  # entity_id -> first seen missing (UTC)
         # Boiler protection: minimum on/off times for zone and global heat demand
         self.min_boiler_on_time = timedelta(minutes=min_boiler_on_time)
@@ -660,7 +662,9 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         duration: int | None = None,
         temperature: float | None = None,
     ) -> None:
-        """Set boost mode for a room."""
+        """Set boost mode for a room (for its boost duration unless one is given)."""
+        if duration is None:
+            duration = self.get_boost_duration(zone_id, room_id)
         if temperature is None:
             temperature = await self._default_boost_temperature(zone_id, room_id)
         success = await self.boost_manager.set_boost(
@@ -688,6 +692,17 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 del self.manual_room_temp[zone_id]
         await self._save_state()
         await self.async_request_refresh()
+
+    def get_boost_duration(self, zone_id: str, room_id: str) -> int:
+        """The room's boost duration in minutes: its own, else the integration's."""
+        return self.boost_durations.get(zone_id, {}).get(room_id, self.boost_manager.boost_duration)
+
+    async def set_room_boost_duration(self, zone_id: str, room_id: str, minutes: int) -> None:
+        """Set how long this room's boosts last when no duration is given."""
+        self.boost_durations.setdefault(zone_id, {})[room_id] = minutes
+        _LOGGER.info("Room %s/%s boost duration set to %d min", zone_id, room_id, minutes)
+        await self._save_state()
+        self.async_update_listeners()
 
     async def update_boost_temperature(
         self, zone_id: str, room_id: str, temperature: float
@@ -823,6 +838,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             self.manual_zone_temp = data.get("manual_zone_temp", {})
             self.manual_room_temp = data.get("manual_room_temp", {})
             self.rooms_off = data.get("rooms_off", {})
+            self.boost_durations = data.get("boost_durations", {})
 
             # Restore boost state (only if not expired)
             stored_boost = data.get("boost_state", {})
@@ -858,6 +874,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             "manual_zone_temp": self.manual_zone_temp,
             "manual_room_temp": self.manual_room_temp,
             "rooms_off": self.rooms_off,
+            "boost_durations": self.boost_durations,
             "room_heating_state": self.heating_logic.get_state_for_storage(),
             "trv_offset_history": self.trv_controller.get_offset_history_for_storage(),
         }

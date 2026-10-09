@@ -2,25 +2,15 @@
 
 set_boost:
   name: Set Boost
-  description: Enable boost mode for a specific room
+  description: Boost rooms for a while, above their schedule
+  target:
+    entity:
+      integration: heating_manager
+      domain: climate
   fields:
-    zone_id:
-      name: Zone ID
-      description: The ID of the zone (e.g., 'downstairs', 'upstairs')
-      required: true
-      example: "downstairs"
-      selector:
-        text:
-    room_id:
-      name: Room ID
-      description: The ID of the room (e.g., 'living_room', 'bedroom')
-      required: true
-      example: "living_room"
-      selector:
-        text:
     duration:
       name: Duration
-      description: Duration of boost in minutes (default 30)
+      description: Duration of boost in minutes (default is the room's boost duration)
       required: false
       example: 60
       selector:
@@ -42,22 +32,11 @@ set_boost:
 
 clear_boost:
   name: Clear Boost
-  description: Disable boost mode for a specific room
-  fields:
-    zone_id:
-      name: Zone ID
-      description: The ID of the zone
-      required: true
-      example: "downstairs"
-      selector:
-        text:
-    room_id:
-      name: Room ID
-      description: The ID of the room
-      required: true
-      example: "living_room"
-      selector:
-        text:
+  description: End the boost in rooms
+  target:
+    entity:
+      integration: heating_manager
+      domain: climate
 
 set_mode:
   name: Set Mode
