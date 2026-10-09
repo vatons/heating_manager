@@ -747,6 +747,8 @@ uv pip install --python .venv/bin/python -r requirements_test.txt
 .venv/bin/pytest
 ```
 
+GitHub Actions run the tests (`tests.yml`) and the checks HACS needs for its default store (`validate.yml`): the [HACS Action](https://hacs.xyz/docs/publish/action/) and Home Assistant's [hassfest](https://github.com/home-assistant/actions#hassfest). The integration's brand icon is in `custom_components/heating_manager/brand/`.
+
 Known bugs are captured as `xfail(strict=True)` tests whose `reason` starts with
 `BUG:`. List them with `.venv/bin/pytest -rx`. When a fix makes one of these tests
 pass, pytest reports it as a failure (`XPASS(strict)`) until the `xfail` marker is

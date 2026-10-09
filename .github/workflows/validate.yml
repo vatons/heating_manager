@@ -1,0 +1,29 @@
+name: Validate
+
+# What HACS needs for the default store: the HACS Action and hassfest must pass
+# (https://hacs.xyz/docs/publish/include). Runs daily too, so changes in HACS or
+# Home Assistant's rules show up before a release.
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: hacs/action@main
+        with:
+          category: integration
+
+  hassfest:
+    name: hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
