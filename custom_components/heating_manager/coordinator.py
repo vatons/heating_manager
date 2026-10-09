@@ -647,6 +647,8 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         rooms = self.rooms_off.setdefault(zone_id, [])
         if off and room_id not in rooms:
             rooms.append(room_id)
+            # An off room doesn't heat, so a boost would only linger and show
+            self.boost_manager.clear_boost(zone_id, room_id)
         elif not off and room_id in rooms:
             rooms.remove(room_id)
         if not rooms:

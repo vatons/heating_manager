@@ -188,7 +188,8 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
     )
-    _attr_preset_modes = ["schedule", "away", "boost"]
+    # "manual": a temperature set on the room itself, until the schedule changes
+    _attr_preset_modes = ["schedule", "manual", "away", "boost"]
     _attr_translation_key = "room"
 
     def __init__(
@@ -276,6 +277,10 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
 
         if room_data.get("boost"):
             return "boost"
+
+        # Reported so choosing "schedule" (e.g. in the more-info dialog) can clear it
+        if room_data.get("manual_room_override", {}).get("active"):
+            return "manual"
 
         return "schedule"
 
@@ -449,6 +454,13 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
                 self._room_id,
                 temperature=None,  # Uses default: current room temp + boost increase
             )
+        elif preset_mode == "manual":
+            # Hold the room's current target until the schedule changes (ending any boost)
+            target = self.target_temperature
+            if target is None or self.preset_mode == "manual":
+                return
+            await self.coordinator.clear_boost(self._zone_id, self._room_id)
+            await self.coordinator.set_manual_room_temperature(self._zone_id, self._room_id, target)
         elif preset_mode == "schedule":
             if self.coordinator.away_mode:
                 await self.coordinator.set_away_mode(False)
@@ -489,7 +501,8 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
     )
-    _attr_preset_modes = ["schedule", "away", "boost"]
+    # "manual": a temperature set on the zone, until the schedule changes
+    _attr_preset_modes = ["schedule", "manual", "away", "boost"]
     _attr_translation_key = "zone"
 
     def __init__(
@@ -601,6 +614,9 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
             if room_data.get("boost"):
                 return "boost"
 
+        if zone_data.get("manual_zone_override", {}).get("active"):
+            return "manual"
+
         return "schedule"
 
     @property
@@ -707,6 +723,12 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
             for room_id, room_config in rooms.items():
                 if room_config.get("sensors"):
                     await self.coordinator.set_boost(self._zone_id, room_id, temperature=None)
+        elif preset_mode == "manual":
+            # Hold the zone's current (average) target until the schedule changes
+            target = self.target_temperature
+            if target is None or self.preset_mode == "manual":
+                return
+            await self.coordinator.set_manual_zone_temperature(self._zone_id, round(target, 1))
         elif preset_mode == "schedule":
             if self.coordinator.away_mode:
                 await self.coordinator.set_away_mode(False)

@@ -6,6 +6,7 @@
           "preset_mode": {
             "state": {
               "schedule": "mdi:calendar-clock",
+              "manual": "mdi:hand-back-right",
               "away": "mdi:home-export-outline",
               "boost": "mdi:rocket-launch"
             }
@@ -17,6 +18,7 @@
           "preset_mode": {
             "state": {
               "schedule": "mdi:calendar-clock",
+              "manual": "mdi:hand-back-right",
               "away": "mdi:home-export-outline",
               "boost": "mdi:rocket-launch"
             }
