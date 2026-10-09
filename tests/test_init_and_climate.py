@@ -206,7 +206,7 @@ async def test_room_set_temperature_while_boosted(hass, setup_hm):
     # Below schedule: boost cleared, manual override set
     await call(hass, SERVICE_SET_TEMPERATURE, {ATTR_ENTITY_ID: ROOM, ATTR_TEMPERATURE: 17})
     state = hass.states.get(ROOM)
-    assert state.attributes[ATTR_PRESET_MODE] == "schedule"
+    assert state.attributes[ATTR_PRESET_MODE] == "manual"
     assert state.attributes[ATTR_TEMPERATURE] == 17
 
 

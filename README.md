@@ -130,6 +130,7 @@ Each zone has a climate entity with the following features:
 - **HVAC Modes**: Heat, Off
 - **Preset Modes**:
   - `schedule` - Follow the configured schedule (also clears any active boost or manual override)
+  - `manual` - Shown while a temperature set on the room or zone overrides the schedule. Choose `schedule` to clear it; choosing `manual` holds the current target until the schedule changes (rooms and zones only)
   - `away` - Frost protection mode
   - `boost` - Temporarily boost room temperature above the schedule
 
@@ -146,7 +147,7 @@ Each room's device has its own boost controls, so you can boost from any dashboa
 
 Rooms without a temperature sensor can't be boosted, so their boost buttons and duration are unavailable.
 
-A boost raises the room to its current target (or its temperature, if higher) + 2°C. Boosting a room that's switched off turns it back on.
+A boost raises the room to its current target (or its temperature, if higher) + 2°C. Boosting a room that's switched off turns it back on, and switching a boosted room off ends its boost.
 
 The room's climate entity also has a **Boost** preset (with **Schedule** to cancel), which uses the same duration. Home Assistant's tile card can show the presets as buttons, next to the target:
 

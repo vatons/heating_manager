@@ -328,6 +328,7 @@
           "preset_mode": {
             "state": {
               "schedule": "Schedule",
+              "manual": "Manual",
               "away": "Away",
               "boost": "Boost"
             }
@@ -339,6 +340,7 @@
           "preset_mode": {
             "state": {
               "schedule": "Schedule",
+              "manual": "Manual",
               "away": "Away",
               "boost": "Boost"
             }
