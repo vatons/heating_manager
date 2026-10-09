@@ -320,5 +320,60 @@
       "title": "Heating Manager can't find some entities",
       "description": "These entities are used by Heating Manager but are missing or disabled, so the rooms they belong to aren't fully controlled:\n\n{entities}\n\nIf you renamed or replaced a device, update the room in Settings → Devices & services → Heating Manager → Configure. If the device is offline or its integration failed to load, this notice clears by itself once it's back."
     }
+  },
+  "entity": {
+    "climate": {
+      "room": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "schedule": "Schedule",
+              "away": "Away",
+              "boost": "Boost"
+            }
+          }
+        }
+      },
+      "zone": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "schedule": "Schedule",
+              "away": "Away",
+              "boost": "Boost"
+            }
+          }
+        }
+      },
+      "global": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "schedule": "Schedule",
+              "away": "Away",
+              "boost": "Boost"
+            }
+          }
+        }
+      }
+    },
+    "sensor": {
+      "boost_end": {
+        "name": "Boost ends"
+      }
+    },
+    "button": {
+      "boost": {
+        "name": "Boost"
+      },
+      "cancel_boost": {
+        "name": "Cancel boost"
+      }
+    },
+    "number": {
+      "boost_duration": {
+        "name": "Boost duration"
+      }
+    }
   }
 }

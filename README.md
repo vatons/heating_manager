@@ -98,6 +98,7 @@ Entity IDs are based on names. Installs migrated from YAML keep their existing e
 
 **Per Room:**
 - `climate.<zone name>_<room name>` (e.g. `climate.downstairs_lounge`) - Room climate control entity
+- `button.<zone name>_<room name>_boost` and `..._cancel_boost`, `sensor.<zone name>_<room name>_boost_ends` and `number.<zone name>_<room name>_boost_duration` - see [Room Boost](#room-boost)
 
   Structured attributes for better organization:
   - **Identification**:
@@ -134,28 +135,53 @@ Each zone has a climate entity with the following features:
 
 ### Room Boost
 
-Enable boost for a room using the `heating_manager.set_boost` service:
+Each room's device has its own boost controls, so you can boost from any dashboard card, automation or voice assistant:
+
+| Entity | What it does |
+|---|---|
+| `button.<zone>_<room>_boost` | Boosts the room for its boost duration |
+| `button.<zone>_<room>_cancel_boost` | Ends the boost |
+| `sensor.<zone>_<room>_boost_ends` | When the boost ends (dashboards show "in 25 minutes"); unknown when not boosted |
+| `number.<zone>_<room>_boost_duration` | The room's boost duration in minutes. Starts at **Configure → Settings → Boost duration**; change it here to give this room its own |
+
+Rooms without a temperature sensor can't be boosted, so their boost buttons and duration are unavailable.
+
+A boost raises the room to its current target (or its temperature, if higher) + 2°C. Boosting a room that's switched off turns it back on.
+
+The room's climate entity also has a **Boost** preset (with **Schedule** to cancel), which uses the same duration. Home Assistant's tile card can show the presets as buttons, next to the target:
 
 ```yaml
-service: heating_manager.set_boost
+type: tile
+entity: climate.downstairs_lounge
+features:
+  - type: target-temperature
+  - type: climate-preset-modes
+    style: icons
+    preset_modes: [schedule, boost]
+```
+
+Leave `away` out of a room's presets: it switches away mode on for the whole house. **Schedule** also clears a manual temperature set on the room.
+
+For a set duration or temperature, use the `heating_manager.set_boost` action on one or more rooms:
+
+```yaml
+action: heating_manager.set_boost
+target:
+  entity_id: climate.downstairs_living_room
 data:
-  zone_id: zone_1
-  room_id: living_room
-  duration: 60  # minutes (optional, default: 30)
-  temperature: 22  # °C (optional, default: room's current target, or its temperature if higher, + 2°C)
+  duration: 60  # minutes (optional, default: the room's boost duration)
+  temperature: 22  # in your unit system (optional, default: room's current target, or its temperature if higher, + 2°C)
 ```
 
 Clear boost:
 
 ```yaml
-service: heating_manager.clear_boost
-data:
-  zone_id: zone_1
-  room_id: living_room
+action: heating_manager.clear_boost
+target:
+  entity_id: climate.downstairs_living_room
 ```
 
-**Check boost status:** All boost information is available in the room climate entity attributes:
-- `climate.downstairs_living_room` → attributes → `boost.temperature`, `boost.time_remaining_minutes`, etc.
+**Check boost status:** besides the sensor, the room climate entity's attributes have `boost.temperature`, `boost.end_time` and `boost.time_remaining_minutes`.
 
 ### Heating Mode
 

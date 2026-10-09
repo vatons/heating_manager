@@ -70,7 +70,8 @@ from .entry_data import (
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.CLIMATE]
+# Sensor, button and number: each room's boost entities, on the room's device
+PLATFORMS = [Platform.CLIMATE, Platform.SENSOR, Platform.BUTTON, Platform.NUMBER]
 
 type HeatingManagerConfigEntry = ConfigEntry[HeatingManagerCoordinator]
 
