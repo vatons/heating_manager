@@ -2,8 +2,5 @@
   "name": "Heating Manager",
   "content_in_root": false,
   "render_readme": true,
-  "domains": [
-    "climate"
-  ],
   "homeassistant": "2025.7.0"
 }
