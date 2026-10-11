@@ -314,11 +314,11 @@
   "issues": {
     "yaml_imported": {
       "title": "Heating Manager YAML configuration can be removed",
-      "description": "Your Heating Manager configuration has been imported and is now managed in the UI (Settings → Devices & services → Heating Manager → Configure). Changes to the YAML are no longer used.\n\nRemove the `heating_manager:` entry from configuration.yaml and delete {config_file}, then restart Home Assistant."
+      "description": "Your Heating Manager configuration has been imported and is now managed in the UI (Settings → Devices & services → Heating Manager). Changes to the YAML are no longer used.\n\nRemove the `heating_manager:` entry from configuration.yaml and delete {config_file}, then restart Home Assistant."
     },
     "missing_entities": {
       "title": "Heating Manager can't find some entities",
-      "description": "These entities are used by Heating Manager but are missing or disabled, so the rooms they belong to aren't fully controlled:\n\n{entities}\n\nIf you renamed or replaced a device, update the room in Settings → Devices & services → Heating Manager → Configure. If the device is offline or its integration failed to load, this notice clears by itself once it's back."
+      "description": "These entities are used by Heating Manager but are missing or disabled, so the rooms they belong to aren't fully controlled:\n\n{entities}\n\nIf you renamed or replaced a device, update its room in the zone's form (the zone's ⚙ in Settings → Devices & services → Heating Manager). If the device is offline or its integration failed to load, this notice clears by itself once it's back."
     }
   },
   "entity": {

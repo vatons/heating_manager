@@ -130,7 +130,7 @@ Each zone has a climate entity with the following features:
 - **HVAC Modes**: Heat, Off
 - **Preset Modes**:
   - `schedule` - Follow the configured schedule (also clears any active boost or manual override)
-  - `manual` - Shown while a temperature set on the room or zone overrides the schedule. Choose `schedule` to clear it; choosing `manual` holds the current target until the schedule changes (rooms and zones only)
+  - `manual` - Shown while a temperature set on the room or zone overrides the schedule. Choose `schedule` to clear it; choosing `manual` holds the current target until the schedule changes (rooms and zones only; on a zone it holds the zone's schedule temperature, and each room keeps its offset)
   - `away` - Frost protection mode
   - `boost` - Temporarily boost room temperature above the schedule
 
@@ -163,7 +163,7 @@ features:
 
 Leave `away` out of a room's presets: it switches away mode on for the whole house. **Schedule** also clears a manual temperature set on the room.
 
-For a set duration or temperature, use the `heating_manager.set_boost` action on one or more rooms:
+For a set duration or temperature, use the `heating_manager.set_boost` action on one or more rooms. Target a zone (e.g. `climate.downstairs`) or the whole house (`climate.heating_manager`) to boost each of its rooms that has temperature sensors; `clear_boost` on a zone or the house ends all of their rooms' boosts:
 
 ```yaml
 action: heating_manager.set_boost

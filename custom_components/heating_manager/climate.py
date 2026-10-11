@@ -24,6 +24,7 @@ from homeassistant.helpers import (
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback, async_get_current_platform
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .const import (
     ATTR_BOOST_DURATION,
@@ -178,6 +179,47 @@ def _global_device_info() -> DeviceInfo:
         manufacturer="Heating Manager",
         model="Heating controller",
     )
+
+
+def _boost_temperature(hass: HomeAssistant, temperature: float | None) -> float | None:
+    """A set_boost temperature (in the system unit) in °C, checked against the boost range."""
+    if temperature is None:
+        return None
+    unit = system_unit(hass)
+    celsius = to_celsius(temperature, unit)
+    if not 5.0 <= celsius <= MAX_BOOST_TEMP:
+        raise ServiceValidationError(
+            f"Boost temperature must be between {from_celsius(5.0, unit):g} and "
+            f"{from_celsius(MAX_BOOST_TEMP, unit):g} {unit}"
+        )
+    return celsius
+
+
+async def _async_boost_rooms(
+    coordinator: HeatingManagerCoordinator,
+    zone_ids: list[str],
+    place: str,
+    duration: int | None,
+    temperature: float | None,
+) -> None:
+    """set_boost on a zone or the whole house: boost each of its rooms that can be boosted."""
+    rooms = [
+        (zone_id, room_id)
+        for zone_id in zone_ids
+        for room_id, room_config in coordinator.config.get("zones", {}).get(zone_id, {}).get("rooms", {}).items()
+        if room_config.get("sensors")
+    ]
+    if not rooms:
+        raise ServiceValidationError(f"{place} has no rooms that can be boosted (boosting needs temperature sensors)")
+    for zone_id, room_id in rooms:
+        await coordinator.set_boost(zone_id, room_id, duration, temperature)
+
+
+async def _async_clear_boost_rooms(coordinator: HeatingManagerCoordinator, zone_ids: list[str]) -> None:
+    """clear_boost on a zone or the whole house: end every room's boost."""
+    for zone_id in zone_ids:
+        for room_id in coordinator.config.get("zones", {}).get(zone_id, {}).get("rooms", {}):
+            await coordinator.clear_boost(zone_id, room_id)
 
 
 class RoomClimate(CoordinatorEntity, ClimateEntity):
@@ -369,7 +411,6 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
 
     def _calculate_time_remaining(self, boost: dict) -> int | None:
         """Calculate minutes remaining in boost."""
-        from homeassistant.util import dt as dt_util
 
         if not boost or "end_time" not in boost:
             return None
@@ -411,7 +452,6 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         if temperature is None:
             return
 
-        from homeassistant.util import dt as dt_util
         current_time = dt_util.now()
         # What the room targets without a room-level override: schedule (or zone
         # override) plus the room's temperature_offset, as shown in the UI.
@@ -472,15 +512,8 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         self, duration: int | None = None, temperature: float | None = None
     ) -> None:
         """Service call to set boost for this room."""
-        if temperature is not None:
-            temperature = to_celsius(temperature, system_unit(self.hass))
-            if not 5.0 <= temperature <= MAX_BOOST_TEMP:
-                raise ServiceValidationError(
-                    f"Boost temperature must be between {from_celsius(5.0, system_unit(self.hass)):g} and "
-                    f"{from_celsius(MAX_BOOST_TEMP, system_unit(self.hass)):g} {system_unit(self.hass)}"
-                )
         await self.coordinator.set_boost(
-            self._zone_id, self._room_id, duration, temperature
+            self._zone_id, self._room_id, duration, _boost_temperature(self.hass, temperature)
         )
 
     async def async_clear_boost_service(self) -> None:
@@ -698,7 +731,6 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
         if temperature is None:
             return
 
-        from homeassistant.util import dt as dt_util
         current_time = dt_util.now()
         zone_config = self.coordinator.config.get("zones", {}).get(self._zone_id, {})
         scheduled_temp = self.coordinator.schedule_manager.get_scheduled_temperature(zone_config, current_time)
@@ -724,11 +756,14 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
                 if room_config.get("sensors"):
                     await self.coordinator.set_boost(self._zone_id, room_id, temperature=None)
         elif preset_mode == "manual":
-            # Hold the zone's current (average) target until the schedule changes
-            target = self.target_temperature
-            if target is None or self.preset_mode == "manual":
+            # Hold the zone at its current schedule temperature until the schedule changes.
+            # Not the zone's displayed target: that averages its rooms with their offsets,
+            # which are added again on top of a zone temperature.
+            if self.preset_mode == "manual":
                 return
-            await self.coordinator.set_manual_zone_temperature(self._zone_id, round(target, 1))
+            zone_config = self.coordinator.config.get("zones", {}).get(self._zone_id, {})
+            scheduled = self.coordinator.schedule_manager.get_scheduled_temperature(zone_config, dt_util.now())
+            await self.coordinator.set_manual_zone_temperature(self._zone_id, scheduled)
         elif preset_mode == "schedule":
             if self.coordinator.away_mode:
                 await self.coordinator.set_away_mode(False)
@@ -738,6 +773,19 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
                 await self.coordinator.clear_boost(self._zone_id, room_id)
                 await self.coordinator.clear_manual_room_temperature(self._zone_id, room_id)
             await self.coordinator.clear_manual_zone_temperature(self._zone_id)
+
+    async def async_set_boost_service(
+        self, duration: int | None = None, temperature: float | None = None
+    ) -> None:
+        """Service call to boost every room in this zone that can be boosted."""
+        await _async_boost_rooms(
+            self.coordinator, [self._zone_id], self._zone_config.get("name", self._zone_id),
+            duration, _boost_temperature(self.hass, temperature),
+        )
+
+    async def async_clear_boost_service(self) -> None:
+        """Service call to end the boost in every room in this zone."""
+        await _async_clear_boost_rooms(self.coordinator, [self._zone_id])
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -970,7 +1018,6 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
         if temperature is None:
             return
 
-        from homeassistant.util import dt as dt_util
         current_time = dt_util.now()
         zones = self.coordinator.config.get("zones", {})
 
@@ -1007,6 +1054,19 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
                     await self.coordinator.clear_boost(zone_id, room_id)
                     await self.coordinator.clear_manual_room_temperature(zone_id, room_id)
                 await self.coordinator.clear_manual_zone_temperature(zone_id)
+
+    async def async_set_boost_service(
+        self, duration: int | None = None, temperature: float | None = None
+    ) -> None:
+        """Service call to boost every room in the house that can be boosted."""
+        await _async_boost_rooms(
+            self.coordinator, list(self.coordinator.config.get("zones", {})), "The house",
+            duration, _boost_temperature(self.hass, temperature),
+        )
+
+    async def async_clear_boost_service(self) -> None:
+        """Service call to end every room's boost."""
+        await _async_clear_boost_rooms(self.coordinator, list(self.coordinator.config.get("zones", {})))
 
     @callback
     def _handle_coordinator_update(self) -> None:

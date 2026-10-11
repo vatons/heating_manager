@@ -2,7 +2,7 @@
 
 set_boost:
   name: Set Boost
-  description: Boost rooms for a while, above their schedule
+  description: Boost rooms for a while, above their schedule. Target a zone or the whole house to boost each of its rooms that has temperature sensors
   target:
     entity:
       integration: heating_manager
@@ -20,19 +20,17 @@ set_boost:
           unit_of_measurement: minutes
     temperature:
       name: Temperature
-      description: Target temperature during boost, in your unit system (default is the room's current target, or its current temperature if higher, + 2°C)
+      description: Target temperature during boost, in your unit system, from 5 to 30 °C (41 to 86 °F). Default is the room's current target, or its current temperature if higher, + 2°C
       required: false
       example: 22
       selector:
         number:
-          min: 5
-          max: 30
+          mode: box
           step: 0.5
-          unit_of_measurement: "°C"
 
 clear_boost:
   name: Clear Boost
-  description: End the boost in rooms
+  description: End the boost in rooms (target a zone or the whole house to end it in all of their rooms)
   target:
     entity:
       integration: heating_manager
@@ -54,29 +52,3 @@ set_mode:
               value: "schedule"
             - label: "Away"
               value: "away"
-
-ignore_manual_override:
-  name: Ignore Manual Override
-  description: Configure whether to ignore manual TRV adjustments for a room
-  fields:
-    zone_id:
-      name: Zone ID
-      description: The ID of the zone
-      required: true
-      example: "downstairs"
-      selector:
-        text:
-    room_id:
-      name: Room ID
-      description: The ID of the room
-      required: true
-      example: "living_room"
-      selector:
-        text:
-    ignore:
-      name: Ignore
-      description: Whether to ignore manual overrides (true) or respect them (false)
-      required: true
-      example: true
-      selector:
-        boolean:

@@ -840,7 +840,16 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             self.manual_zone_temp = data.get("manual_zone_temp", {})
             self.manual_room_temp = data.get("manual_room_temp", {})
             self.rooms_off = data.get("rooms_off", {})
-            self.boost_durations = data.get("boost_durations", {})
+            # Rooms deleted since the last save don't keep a boost duration
+            zones = self.config.get("zones", {})
+            self.boost_durations = {
+                zone_id: kept
+                for zone_id, durations in (data.get("boost_durations") or {}).items()
+                if (kept := {
+                    room_id: minutes for room_id, minutes in durations.items()
+                    if room_id in zones.get(zone_id, {}).get("rooms", {})
+                })
+            }
 
             # Restore boost state (only if not expired)
             stored_boost = data.get("boost_state", {})
