@@ -32,7 +32,9 @@ CONF_MIN_BOILER_OFF_TIME = "min_boiler_off_time"
 
 # Heating Analytics Configuration
 CONF_ANALYTICS_ENABLED = "analytics_enabled"
-CONF_ANALYTICS_HISTORY_SIZE = "analytics_history_size"
+CONF_ANALYTICS_HISTORY_SIZE = "analytics_history_size"   # no longer used (3.6); accepted in YAML
+# Optional: a sensor or weather entity for the outdoor temperature (used by analytics)
+CONF_OUTDOOR_TEMPERATURE = "outdoor_temperature"
 CONF_ANALYTICS_MIN_SAMPLES = "analytics_min_samples"
 CONF_DERIVATIVE_SMOOTHING = "derivative_smoothing_factor"
 CONF_MAX_TEMP_CHANGE_PER_MIN = "max_temp_change_per_minute"

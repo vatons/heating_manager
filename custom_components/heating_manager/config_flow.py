@@ -91,14 +91,14 @@ SETTINGS_SECTIONS: tuple[tuple[str, tuple[str, ...], bool], ...] = (
     ("temperatures", ("minimum_temp", "frost_protection_temp"), False),
     ("heating_demand", ("heating_demand_mode", "heating_deadband"), False),
     ("boiler", ("min_boiler_on_time", "min_boiler_off_time"), False),
-    ("sensors", ("fallback_mode",), False),
+    ("sensors", ("fallback_mode", "outdoor_temperature"), False),
     ("boost", ("boost_duration",), False),
     ("trv_control", (
         "trv_overshoot_enabled", "trv_overshoot_max", "trv_overshoot_threshold",
         "trv_cooldown_offset", "trv_offset_ema_alpha",
     ), True),
     ("analytics", (
-        "analytics_enabled", "analytics_history_size", "analytics_min_samples",
+        "analytics_enabled", "analytics_min_samples",
         "derivative_smoothing_factor",
     ), True),
     ("updates", ("update_interval",), True),
@@ -106,6 +106,13 @@ SETTINGS_SECTIONS: tuple[tuple[str, tuple[str, ...], bool], ...] = (
 
 
 def _setting_selector(spec: SettingSpec) -> selector.Selector:
+    if spec.kind == "entity":
+        # The outdoor temperature: a temperature sensor or a weather entity
+        return selector.EntitySelector(
+            selector.EntitySelectorConfig(
+                filter=[{"domain": "sensor", "device_class": "temperature"}, {"domain": "weather"}]
+            )
+        )
     if spec.kind == "bool":
         return selector.BooleanSelector()
     if spec.kind == "select":
@@ -509,14 +516,22 @@ class HeatingManagerOptionsFlow(OptionsFlow):
         current = self._current_settings()
         if user_input is not None:
             for section_key, keys, _ in SETTINGS_SECTIONS:
+                section_input = user_input.get(section_key) or {}
                 for key in keys:
-                    if key in (user_input.get(section_key) or {}):
-                        current[key] = coerce_setting(SETTINGS_BY_KEY[key], user_input[section_key][key])
+                    if key in section_input:
+                        current[key] = coerce_setting(SETTINGS_BY_KEY[key], section_input[key])
+                    elif SETTINGS_BY_KEY[key].kind == "entity" and section_key in user_input:
+                        current[key] = ""        # an optional entity left empty: cleared
             return self.async_create_entry(data={**self.config_entry.options, OPT_SETTINGS: current})
         schema = {
             vol.Required(section_key): section(
                 vol.Schema({
-                    vol.Required(key, default=current[key]): _setting_selector(SETTINGS_BY_KEY[key])
+                    (
+                        # Optional and empty unless set: an entity can't default to ""
+                        vol.Optional(key, description={"suggested_value": current[key] or None})
+                        if SETTINGS_BY_KEY[key].kind == "entity"
+                        else vol.Required(key, default=current[key])
+                    ): _setting_selector(SETTINGS_BY_KEY[key])
                     for key in keys
                 }),
                 {"collapsed": collapsed},

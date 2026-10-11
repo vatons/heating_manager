@@ -110,7 +110,9 @@ async def test_analytics_disabled(hass, basic, make_coordinator):
 async def test_analytics_populated(basic):
     coordinator, _ = basic
     await refresh(coordinator)
-    assert room_data(coordinator)["heating_analytics"]["samples_count"] == 1
+    analytics = room_data(coordinator)["heating_analytics"]
+    assert analytics["current_state"] == "heated"        # cold room, calling for heat
+    assert analytics["heating_stretches"] == 0            # nothing learned yet
 
 
 async def test_invalid_zone_and_room_configs_are_skipped(hass, add_trvs, make_coordinator):
@@ -409,7 +411,7 @@ async def test_state_persists_across_restart(hass, basic, make_coordinator):
     assert restarted.manual_zone_temp["zone_1"]["temperature"] == 20.0
     assert restarted.boost_manager.get_boost_info("zone_1", "room", NOON)["temperature"] == 23.0
     assert restarted.trv_controller._get_ema_offset("zone_1", "room", TRV) == pytest.approx(0.0)
-    assert "zone_1" in restarted.heating_analytics.temp_history
+    assert "room" in restarted.heating_analytics.rooms["zone_1"]
 
 
 async def test_loads_v1_storage(hass, hass_storage, basic, make_coordinator):
@@ -570,7 +572,7 @@ async def test_monitoring_only_zone_reports_but_never_heats(hass, add_trvs, make
         assert data["temperature"] == temp
         assert data["target_temperature"] == 19.0
         assert data["needs_heating"] is False
-        assert data["heating_analytics"]["samples_count"] == 1
+        assert data["heating_analytics"]["current_state"] == "not_heated"
     # TRVs in a monitoring zone are left exactly as they are
     assert trvs[TRV].set_temperature_calls == []
     assert trvs[TRV].target_temperature == 8.0

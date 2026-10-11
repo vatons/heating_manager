@@ -33,6 +33,7 @@ from .schedule_manager import ScheduleManager
 from .temperature_manager import TemperatureManager
 from .trv_controller import TRVController
 from .trv_manager import TRVManager
+from .units import sensor_celsius, to_celsius
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -111,12 +112,12 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         trv_cooldown_offset: float,
         trv_offset_ema_alpha: float,
         analytics_enabled: bool,
-        analytics_history_size: int,
         analytics_min_samples: int,
         derivative_smoothing: float,
         min_boiler_on_time: int = 0,
         min_boiler_off_time: int = 0,
         config_entry: ConfigEntry | None = None,
+        outdoor_temperature_entity: str | None = None,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
@@ -177,12 +178,14 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         # Initialize heating analytics
         if analytics_enabled:
             self.heating_analytics = HeatingAnalytics(
-                history_size=analytics_history_size,
-                min_samples=analytics_min_samples,
-                smoothing=derivative_smoothing,
+                min_stretches=analytics_min_samples,
+                learning_rate=derivative_smoothing,
             )
         else:
             self.heating_analytics = None
+        # Shared by every room: lets analytics learn heat loss to the outside
+        self.outdoor_temperature_entity = outdoor_temperature_entity
+        self.outdoor_temperature: float | None = None
 
     async def _async_update_data(self) -> dict:
         """Fetch data from sensors and update heating logic."""
@@ -195,6 +198,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
 
             zones = self.config.get("zones", {})
             current_time = dt_util.now()
+            self.outdoor_temperature = self._read_outdoor_temperature()
             _state_changed = False  # Track whether any override was auto-expired
             # Collect expired overrides to delete after iterating — avoids mutating
             # manual_room_temp / manual_zone_temp while inside an async loop where
@@ -567,6 +571,24 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             base = max(base, room_temp)
         return base + DEFAULT_BOOST_TEMP_INCREASE
 
+    def _read_outdoor_temperature(self) -> float | None:
+        """The outdoor temperature in °C from the configured sensor or weather entity."""
+        entity_id = self.outdoor_temperature_entity
+        if not entity_id:
+            return None
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in ("unavailable", "unknown"):
+            return None
+        try:
+            if entity_id.startswith("weather."):
+                value = state.attributes.get("temperature")
+                if value is None:
+                    return None
+                return to_celsius(float(value), state.attributes.get("temperature_unit"))
+            return sensor_celsius(state)
+        except (TypeError, ValueError):
+            return None
+
     def heat_source_state(self, entity_id: str | None) -> bool | None:
         """Whether a zone's heat source entity says it's heating; None if unknown.
 
@@ -608,14 +630,21 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             room_data["heated"] = heated
             self._room_heated.setdefault(zone_id, {})[room_id] = heated
             room_temp = room_data["temperature"]
-            if self.heating_analytics is None or room_temp is None:
+            if self.heating_analytics is None:
+                continue
+            if room_temp is None:
+                self.heating_analytics.skip_reading(zone_id, room_id)
                 continue
             self.heating_analytics.record_temperature(
                 zone_id, room_id, room_temp, room_data["needs_heating"], current_time,
                 heat_flowing=heat_flowing,
+                # Fallback temperatures (zone average, TRV) aren't learned from
+                own_sensors=room_data["temperature_source"] == "local_sensors",
+                outdoor_temp=self.outdoor_temperature,
             )
             room_data["heating_analytics"] = self.heating_analytics.get_analytics(
-                zone_id, room_id, room_temp, room_data["target_temperature"], room_data["needs_heating"]
+                zone_id, room_id, room_temp, room_data["target_temperature"], room_data["needs_heating"],
+                outdoor_temp=self.outdoor_temperature, now=current_time,
             ).to_dict()
 
     @callback

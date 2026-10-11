@@ -1,39 +1,191 @@
-"""Heating analytics for tracking temperature changes and estimating heating performance."""
-from collections import deque
+"""Heating analytics: learn how each room heats and cools, from whole stretches of time.
+
+A room's readings are split into stretches: "heated" while it wants heat and its
+zone's heat source is on, "not heated" otherwise. When a stretch ends, what it
+showed is folded into the room's long-term figures:
+
+- warm-up: how long after heat starts the room begins to warm (radiators take
+  time to get hot);
+- heating rate: how fast it warms after that, fitted as a straight line through
+  every reading, so a sensor that reports in 0.1 °C steps still gives the right
+  answer;
+- cooling rate: how fast it cools without heat, ignoring the first minutes after
+  heating stops (radiators are still warm);
+- heat loss per degree: the cooling rate divided by how much warmer the room is
+  than outside, when an outdoor temperature is available. Unlike the cooling
+  rate it doesn't change with the weather.
+
+Only readings from the room's own sensors are used; fallback temperatures (zone
+average, TRV) are skipped. Learned figures are saved; the stretch in progress
+isn't.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import logging
-from statistics import mean, stdev
+import math
+from typing import Any
 
 from homeassistant.util import dt as dt_util
 
-from .models import HeatingAnalyticsData, TemperatureHistoryEntry
+from .models import HeatingAnalyticsData
 
 _LOGGER = logging.getLogger(__name__)
 
-# Readings further apart than this (e.g. across a restart) aren't used for a rate
+STORAGE_FORMAT = 2
+
+# Readings further apart than this (e.g. across a restart) end the stretch unlearned
 MAX_SAMPLE_GAP = timedelta(minutes=30)
+# A rise of one sensor step above the stretch's first reading: the room has started to warm
+RISE_THRESHOLD = 0.1
+# Heated stretches shorter than this aren't used for the warm-up time
+MIN_HEATED_STRETCH = timedelta(minutes=15)
+# The warming part of a heated stretch must be at least this long for a heating rate
+MIN_RISE_SPAN = timedelta(minutes=10)
+# After heating stops, radiators still give heat for a while: not used for cooling
+COOL_SETTLE = timedelta(minutes=15)
+# The cooling part of a stretch must be at least this long for a cooling rate
+MIN_COOLING_SPAN = timedelta(minutes=30)
+# A long stretch is learned from in parts this long, so a room that's never heated still learns
+MAX_STRETCH_SPAN = timedelta(hours=3)
+# Heat loss per degree needs the room this much warmer than outside to be meaningful
+MIN_INDOOR_OUTDOOR_DIFFERENCE = 3.0
+# The rate of the stretch in progress is shown once it covers this long
+MIN_LIVE_SPAN = timedelta(minutes=5)
+
+
+@dataclass
+class _LineFit:
+    """Running least-squares fit of temperature against time (hours since `origin`)."""
+
+    origin: datetime
+    n: int = 0
+    sum_t: float = 0.0
+    sum_y: float = 0.0
+    sum_tt: float = 0.0
+    sum_ty: float = 0.0
+    first: datetime | None = None
+    last: datetime | None = None
+    sum_outdoor: float = 0.0
+    n_outdoor: int = 0
+
+    def add(self, timestamp: datetime, temperature: float, outdoor: float | None) -> None:
+        t = (timestamp - self.origin).total_seconds() / 3600.0
+        self.n += 1
+        self.sum_t += t
+        self.sum_y += temperature
+        self.sum_tt += t * t
+        self.sum_ty += t * temperature
+        self.first = self.first or timestamp
+        self.last = timestamp
+        if outdoor is not None:
+            self.sum_outdoor += outdoor
+            self.n_outdoor += 1
+
+    @property
+    def span(self) -> timedelta:
+        return (self.last - self.first) if self.first and self.last else timedelta(0)
+
+    def slope(self) -> float | None:
+        """°C per hour, or None with too little to fit."""
+        if self.n < 2:
+            return None
+        denominator = self.n * self.sum_tt - self.sum_t * self.sum_t
+        if denominator <= 1e-12:
+            return None
+        return (self.n * self.sum_ty - self.sum_t * self.sum_y) / denominator
+
+    def time_at(self, temperature: float) -> datetime | None:
+        """When the fitted line passes a temperature (None if it's flat or falling)."""
+        slope = self.slope()
+        if slope is None or slope <= 0:
+            return None
+        intercept = (self.sum_y - slope * self.sum_t) / self.n
+        return self.origin + timedelta(hours=(temperature - intercept) / slope)
+
+    @property
+    def mean_temperature(self) -> float:
+        return self.sum_y / self.n
+
+    @property
+    def mean_outdoor(self) -> float | None:
+        # Only when the outdoor temperature was known for most of the stretch
+        if self.n_outdoor == 0 or self.n_outdoor < self.n / 2:
+            return None
+        return self.sum_outdoor / self.n_outdoor
+
+
+@dataclass
+class _Stretch:
+    """The stretch in progress for one room."""
+
+    heated: bool
+    start: datetime
+    start_temperature: float
+    after_heat: bool                  # not heated, straight after heating: let radiators cool first
+    continued: bool = False           # carries on a longer stretch: no warm-up to learn
+    last: datetime | None = None
+    last_temperature: float | None = None
+    rise_at: datetime | None = None   # heated: when the room first showed a rise (live estimates)
+    fit: _LineFit | None = None
+    # Heated: every reading (hours since start, °C), fitted as warm-up + climb at the end
+    readings: list[tuple[float, float]] = field(default_factory=list)
+
+
+@dataclass
+class _Room:
+    """What's learned for one room."""
+
+    heating_rate: float | None = None
+    warm_up_minutes: float | None = None
+    heating_stretches: int = 0
+    cooling_rate: float | None = None
+    cooling_stretches: int = 0
+    heat_loss: float | None = None    # °C/h lost per °C warmer than outside
+    heat_loss_stretches: int = 0
+    last_heated: bool | None = None   # state of the previous stretch
+    stretch: _Stretch | None = field(default=None, repr=False)
+
+    LEARNED = (
+        "heating_rate", "warm_up_minutes", "heating_stretches",
+        "cooling_rate", "cooling_stretches", "heat_loss", "heat_loss_stretches",
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {key: getattr(self, key) for key in self.LEARNED}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> _Room:
+        room = cls()
+        for key in cls.LEARNED:
+            value = data.get(key)
+            if value is None:
+                continue
+            setattr(room, key, int(value) if key.endswith("stretches") else float(value))
+        return room
 
 
 class HeatingAnalytics:
-    """Tracks temperature history and calculates heating performance metrics."""
+    """Learns each room's warm-up time, heating rate, cooling rate and heat loss."""
 
-    def __init__(self, history_size: int, min_samples: int, smoothing: float):
-        """Initialize the heating analytics manager.
-
-        Args:
-            history_size: Maximum number of temperature readings to keep per room
-            min_samples: Minimum number of samples required for derivative calculation
-            smoothing: EMA smoothing factor for derivative (0.0-1.0, higher=more responsive)
+    def __init__(self, min_stretches: int, learning_rate: float):
         """
-        self.history_size = history_size
-        self.min_samples = min_samples
-        self.smoothing = smoothing
+        Args:
+            min_stretches: stretches a room needs before a rate (and estimates using it) is shown
+            learning_rate: how much each new stretch moves a learned figure (0-1)
+        """
+        self.min_stretches = max(1, int(min_stretches))
+        self.learning_rate = learning_rate
+        self.rooms: dict[str, dict[str, _Room]] = {}
 
-        # Store: zone_id -> room_id -> deque of TemperatureHistoryEntry
-        self.temp_history: dict[str, dict[str, deque]] = {}
+    def _room(self, zone_id: str, room_id: str) -> _Room:
+        return self.rooms.setdefault(zone_id, {}).setdefault(room_id, _Room())
 
-        # Store smoothed derivatives: zone_id -> room_id -> {heating_rate, cooling_rate}
-        self.smoothed_rates: dict[str, dict[str, dict]] = {}
+    def _learn(self, old: float | None, new: float) -> float:
+        return new if old is None else self.learning_rate * new + (1 - self.learning_rate) * old
+
+    # -- recording ------------------------------------------------------------
 
     def record_temperature(
         self,
@@ -43,248 +195,111 @@ class HeatingAnalytics:
         needs_heating: bool,
         timestamp: datetime | None = None,
         heat_flowing: bool | None = None,
+        own_sensors: bool = True,
+        outdoor_temp: float | None = None,
     ) -> None:
-        """Record a temperature reading for history tracking.
+        """Add a reading.
 
         Args:
-            zone_id: Zone identifier
-            room_id: Room identifier
-            temp: Temperature reading
-            needs_heating: Whether the room currently needs heating
-            timestamp: Timestamp of reading (defaults to now)
-            heat_flowing: Whether the zone's heat source is heating (None if unknown).
-                The room counts as heated until the next reading only when it
-                wants heat and heat is flowing.
+            temp: room temperature (°C)
+            needs_heating: the room wants heat
+            heat_flowing: the zone's heat source is on (None: not known, assume it is)
+            own_sensors: temp comes from the room's own sensors; other readings
+                aren't learned from and end the stretch
+            outdoor_temp: outdoor temperature (°C), if known
         """
-        # Stored in UTC so rates aren't distorted by a daylight-saving change
         timestamp = dt_util.utcnow() if timestamp is None else dt_util.as_utc(timestamp)
+        heated = bool(needs_heating) and heat_flowing is not False
+        room = self._room(zone_id, room_id)
+        stretch = room.stretch
 
-        # Initialize storage if needed
-        if zone_id not in self.temp_history:
-            self.temp_history[zone_id] = {}
-        if room_id not in self.temp_history[zone_id]:
-            self.temp_history[zone_id][room_id] = deque(maxlen=self.history_size)
+        if not own_sensors:
+            self._end_stretch(room, learn=False)
+            return
+        if stretch is not None and stretch.last is not None:
+            if timestamp <= stretch.last:
+                return
+            if timestamp - stretch.last > MAX_SAMPLE_GAP:
+                self._end_stretch(room, learn=False)
+                stretch = None
+        if stretch is not None and stretch.heated != heated:
+            self._end_stretch(room, learn=True)
+            stretch = None
+        if stretch is not None and stretch.last is not None and stretch.last - stretch.start >= MAX_STRETCH_SPAN:
+            # Learn from what's there and carry on without a gap
+            self._end_stretch(room, learn=True)
+            stretch = self._start(room, heated, timestamp, temp, continued=True)
+        if stretch is None:
+            stretch = self._start(room, heated, timestamp, temp)
+        self._add(stretch, timestamp, temp, outdoor_temp)
 
-        # Add entry to history
-        entry = TemperatureHistoryEntry(
-            timestamp=timestamp, temperature=temp, needs_heating=needs_heating,
-            heat_flowing=heat_flowing,
+    def _start(self, room: _Room, heated: bool, timestamp: datetime, temp: float, continued: bool = False) -> _Stretch:
+        # After a restart the previous state isn't known: assume radiators may still be warm
+        after_heat = not heated and room.last_heated is not False and not continued
+        stretch = _Stretch(
+            heated=heated, start=timestamp, start_temperature=temp,
+            after_heat=after_heat, continued=continued,
         )
-        self.temp_history[zone_id][room_id].append(entry)
+        if continued and heated:
+            stretch.rise_at = timestamp           # already warming
+        room.stretch = stretch
+        return stretch
 
-        _LOGGER.debug(
-            "Recorded temperature for %s/%s: %.1f°C (needs_heating=%s, heat_flowing=%s)",
-            zone_id,
-            room_id,
-            temp,
-            needs_heating,
-            heat_flowing,
-        )
-
-    def _calculate_derivative(
-        self, zone_id: str, room_id: str, heating_filter: bool | None
-    ) -> float | None:
-        """Calculate temperature derivative (rate of change) in °C/hour.
-
-        Each rate is taken between two consecutive readings, and belongs to the
-        state at the first of them (what the room was doing until the next).
-        So a heating rate only covers time the room wanted heat while the heat
-        source was on, and a cooling rate time without heat going in.
-
-        Args:
-            zone_id: Zone identifier
-            room_id: Room identifier
-            heating_filter: If True, only intervals when the room was heated
-                          If False, only intervals when it wasn't
-                          If None, all intervals
-
-        Returns:
-            Temperature change rate in °C/hour, or None if insufficient data
-        """
-        if zone_id not in self.temp_history or room_id not in self.temp_history[zone_id]:
-            return None
-
-        history = list(self.temp_history[zone_id][room_id])
-
-        derivatives = []
-        for prev_entry, curr_entry in zip(history, history[1:]):
-            if heating_filter is not None and prev_entry.heated != heating_filter:
-                continue
-            gap = curr_entry.timestamp - prev_entry.timestamp
-            if gap <= timedelta(0) or gap > MAX_SAMPLE_GAP:
-                continue
-            time_diff_hours = gap.total_seconds() / 3600.0
-            derivatives.append((curr_entry.temperature - prev_entry.temperature) / time_diff_hours)
-
-        # min_samples readings give min_samples - 1 intervals
-        if len(derivatives) < max(1, self.min_samples - 1):
-            return None
-
-        if not derivatives:
-            return None
-
-        # Filter outliers (values beyond 2 standard deviations) if we have enough samples
-        if len(derivatives) >= 5:
-            try:
-                avg = mean(derivatives)
-                std = stdev(derivatives)
-                derivatives = [d for d in derivatives if abs(d - avg) <= 2 * std]
-            except Exception as err:
-                _LOGGER.debug("Could not filter outliers: %s", err)
-
-        if not derivatives:
-            return None
-
-        # Return average derivative
-        return mean(derivatives)
-
-    def calculate_heating_rate(self, zone_id: str, room_id: str) -> float | None:
-        """Calculate heating rate in °C/hour when actively heating.
-
-        Returns:
-            Heating rate in °C/hour, or None if insufficient data
-        """
-        return self._calculate_derivative(zone_id, room_id, heating_filter=True)
-
-    def calculate_cooling_rate(self, zone_id: str, room_id: str) -> float | None:
-        """Calculate cooling rate in °C/hour when not heating.
-
-        Returns:
-            Cooling rate in °C/hour (typically negative), or None if insufficient data
-        """
-        return self._calculate_derivative(zone_id, room_id, heating_filter=False)
-
-    def _update_smoothed_rates(
-        self, zone_id: str, room_id: str, heating_rate: float | None, cooling_rate: float | None
-    ) -> tuple[float | None, float | None]:
-        """Update smoothed rates using EMA.
-
-        Args:
-            zone_id: Zone identifier
-            room_id: Room identifier
-            heating_rate: Current heating rate calculation
-            cooling_rate: Current cooling rate calculation
-
-        Returns:
-            Tuple of (smoothed_heating_rate, smoothed_cooling_rate)
-        """
-        # Initialize storage if needed
-        if zone_id not in self.smoothed_rates:
-            self.smoothed_rates[zone_id] = {}
-        if room_id not in self.smoothed_rates[zone_id]:
-            self.smoothed_rates[zone_id][room_id] = {
-                "heating_rate": None,
-                "cooling_rate": None,
-            }
-
-        room_rates = self.smoothed_rates[zone_id][room_id]
-
-        # Apply EMA smoothing
-        if heating_rate is not None:
-            if room_rates["heating_rate"] is None:
-                room_rates["heating_rate"] = heating_rate
-            else:
-                room_rates["heating_rate"] = (
-                    self.smoothing * heating_rate + (1 - self.smoothing) * room_rates["heating_rate"]
-                )
-
-        if cooling_rate is not None:
-            if room_rates["cooling_rate"] is None:
-                room_rates["cooling_rate"] = cooling_rate
-            else:
-                room_rates["cooling_rate"] = (
-                    self.smoothing * cooling_rate + (1 - self.smoothing) * room_rates["cooling_rate"]
-                )
-
-        return room_rates["heating_rate"], room_rates["cooling_rate"]
-
-    def _get_trend_description(self, rate: float | None) -> str:
-        """Get human-readable temperature trend description.
-
-        Args:
-            rate: Temperature change rate in °C/hour
-
-        Returns:
-            Trend description string
-        """
-        if rate is None:
-            return "insufficient_data"
-        elif rate > 1.0:
-            return "heating_rapidly"
-        elif rate > 0.2:
-            return "heating_slowly"
-        elif rate >= -0.2:
-            return "stable"
-        elif rate >= -1.0:
-            return "cooling_slowly"
+    @staticmethod
+    def _add(stretch: _Stretch, timestamp: datetime, temp: float, outdoor: float | None) -> None:
+        if stretch.heated:
+            stretch.readings.append(((timestamp - stretch.start).total_seconds() / 3600.0, temp))
+            if stretch.rise_at is None and temp >= stretch.start_temperature + RISE_THRESHOLD - 1e-9:
+                stretch.rise_at = timestamp
+                stretch.fit = _LineFit(origin=stretch.start)
+                # The warming starts from the last reading before the rise
+                if stretch.last is not None and stretch.last_temperature is not None:
+                    stretch.fit.add(stretch.last, stretch.last_temperature, outdoor)
+            if stretch.fit is not None:
+                stretch.fit.add(timestamp, temp, outdoor)
         else:
-            return "cooling_rapidly"
+            if stretch.fit is None and (not stretch.after_heat or timestamp - stretch.start >= COOL_SETTLE):
+                stretch.fit = _LineFit(origin=stretch.start)
+            if stretch.fit is not None:
+                stretch.fit.add(timestamp, temp, outdoor)
+        stretch.last = timestamp
+        stretch.last_temperature = temp
 
-    def estimate_time_to_target(
-        self,
-        zone_id: str,
-        room_id: str,
-        current_temp: float,
-        target_temp: float,
-        needs_heating: bool,
-    ) -> tuple[int | None, datetime | None, float]:
-        """Estimate time to reach target temperature.
+    def _end_stretch(self, room: _Room, learn: bool) -> None:
+        stretch = room.stretch
+        room.stretch = None
+        if stretch is None:
+            return
+        room.last_heated = stretch.heated
+        if not learn or stretch.last is None:
+            return
+        fit = stretch.fit
+        if stretch.heated:
+            result = _warm_up_and_climb(stretch.readings)
+            if result is None:
+                return
+            warm_up_hours, slope = result
+            if not stretch.continued and stretch.last - stretch.start >= MIN_HEATED_STRETCH:
+                room.warm_up_minutes = self._learn(room.warm_up_minutes, warm_up_hours * 60)
+            room.heating_rate = self._learn(room.heating_rate, slope)
+            room.heating_stretches += 1
+            return
+        if fit is None or fit.span < MIN_COOLING_SPAN or (slope := fit.slope()) is None:
+            return
+        room.cooling_rate = self._learn(room.cooling_rate, slope)
+        room.cooling_stretches += 1
+        outdoor = fit.mean_outdoor
+        if outdoor is not None:
+            difference = fit.mean_temperature - outdoor
+            if difference >= MIN_INDOOR_OUTDOOR_DIFFERENCE and slope < 0:
+                room.heat_loss = self._learn(room.heat_loss, -slope / difference)
+                room.heat_loss_stretches += 1
 
-        Args:
-            zone_id: Zone identifier
-            room_id: Room identifier
-            current_temp: Current room temperature
-            target_temp: Target temperature
-            needs_heating: Whether room currently needs heating
+    def skip_reading(self, zone_id: str, room_id: str) -> None:
+        """No usable temperature this update: end the stretch without learning from it."""
+        self._end_stretch(self._room(zone_id, room_id), learn=False)
 
-        Returns:
-            Tuple of (eta_minutes, eta_timestamp, confidence)
-            - eta_minutes: Minutes until target reached (None if can't estimate)
-            - eta_timestamp: Datetime when target will be reached (None if can't estimate)
-            - confidence: Prediction confidence 0.0-1.0
-        """
-        # Get appropriate rate based on heating state
-        if needs_heating:
-            rate = self.smoothed_rates.get(zone_id, {}).get(room_id, {}).get("heating_rate")
-        else:
-            rate = self.smoothed_rates.get(zone_id, {}).get(room_id, {}).get("cooling_rate")
-
-        if rate is None or abs(rate) < 0.05:
-            # No rate data or rate too small to be useful
-            return None, None, 0.0
-
-        temp_diff = target_temp - current_temp
-
-        # Check if we're moving toward or away from target
-        if (temp_diff > 0 and rate <= 0) or (temp_diff < 0 and rate >= 0):
-            # Moving away from target or not moving at all
-            return None, None, 0.0
-
-        # Calculate time in hours
-        time_hours = abs(temp_diff / rate)
-
-        # Convert to minutes
-        time_minutes = int(time_hours * 60)
-
-        # Calculate ETA timestamp
-        eta_timestamp = dt_util.as_local(dt_util.utcnow() + timedelta(minutes=time_minutes))
-
-        # Calculate confidence based on sample count
-        history_count = len(self.temp_history.get(zone_id, {}).get(room_id, []))
-        if history_count < self.min_samples:
-            confidence = 0.0
-        elif history_count < 10:
-            confidence = 0.5
-        elif history_count < 20:
-            confidence = 0.75
-        else:
-            confidence = 0.9
-
-        # Reduce confidence for very long predictions (>2 hours)
-        if time_hours > 2:
-            confidence *= 0.7
-
-        return time_minutes, eta_timestamp, confidence
+    # -- results ----------------------------------------------------------------
 
     def get_analytics(
         self,
@@ -293,102 +308,172 @@ class HeatingAnalytics:
         current_temp: float,
         target_temp: float,
         needs_heating: bool,
+        outdoor_temp: float | None = None,
+        now: datetime | None = None,
     ) -> HeatingAnalyticsData:
-        """Get complete analytics for a room.
+        """What's learned for a room, the stretch in progress, and time to reach target."""
+        now = dt_util.utcnow() if now is None else dt_util.as_utc(now)
+        room = self._room(zone_id, room_id)
+        enough = self.min_stretches
+        heating_rate = room.heating_rate if room.heating_stretches >= enough else None
+        cooling_rate = room.cooling_rate if room.cooling_stretches >= enough else None
+        heat_loss = room.heat_loss if room.heat_loss_stretches >= enough else None
+        warm_up = room.warm_up_minutes if room.heating_stretches >= enough else None
 
-        Args:
-            zone_id: Zone identifier
-            room_id: Room identifier
-            current_temp: Current room temperature
-            target_temp: Target temperature
-            needs_heating: Whether room currently needs heating
+        stretch = room.stretch
+        state = None if stretch is None else ("heated" if stretch.heated else "not_heated")
+        minutes = None if stretch is None or stretch.last is None else int((stretch.last - stretch.start).total_seconds() // 60)
+        rate_so_far = None
+        if stretch is not None and stretch.fit is not None and stretch.fit.n >= 3 and stretch.fit.span >= MIN_LIVE_SPAN:
+            rate_so_far = stretch.fit.slope()
 
-        Returns:
-            HeatingAnalyticsData with all analytics information
-        """
-        # Calculate current rates
-        heating_rate_raw = self.calculate_heating_rate(zone_id, room_id)
-        cooling_rate_raw = self.calculate_cooling_rate(zone_id, room_id)
+        trend_rate = rate_so_far
+        if trend_rate is None and stretch is not None:
+            trend_rate = heating_rate if stretch.heated else cooling_rate
 
-        # Update smoothed rates
-        heating_rate, cooling_rate = self._update_smoothed_rates(
-            zone_id, room_id, heating_rate_raw, cooling_rate_raw
+        eta_minutes, confidence = self._time_to_target(
+            room, stretch, current_temp, target_temp, needs_heating, outdoor_temp,
+            heating_rate, warm_up, cooling_rate, heat_loss,
         )
-
-        # Get current rate for trend
-        current_rate = heating_rate if needs_heating else cooling_rate
-        trend = self._get_trend_description(current_rate)
-
-        # Estimate time to target
-        eta_minutes, eta_timestamp, confidence = self.estimate_time_to_target(
-            zone_id, room_id, current_temp, target_temp, needs_heating
+        eta_timestamp = (
+            dt_util.as_local(now + timedelta(minutes=eta_minutes)) if eta_minutes is not None else None
         )
-
-        # Get sample count
-        samples_count = len(self.temp_history.get(zone_id, {}).get(room_id, []))
-
         return HeatingAnalyticsData(
             heating_rate=heating_rate,
+            warm_up_minutes=None if warm_up is None else round(warm_up),
+            heating_stretches=room.heating_stretches,
             cooling_rate=cooling_rate,
+            heat_loss_per_degree=heat_loss,
+            cooling_stretches=room.cooling_stretches,
+            current_state=state,
+            current_minutes=minutes,
+            rate_so_far=rate_so_far,
+            trend=_trend(trend_rate),
             eta_minutes=eta_minutes,
             eta_timestamp=eta_timestamp,
             confidence=confidence,
-            samples_count=samples_count,
-            trend=trend,
         )
 
+    def _time_to_target(
+        self, room: _Room, stretch: _Stretch | None, current: float, target: float,
+        needs_heating: bool, outdoor: float | None,
+        heating_rate: float | None, warm_up: float | None,
+        cooling_rate: float | None, heat_loss: float | None,
+    ) -> tuple[int | None, float]:
+        """(minutes, confidence) to reach target: warming if the room wants heat, else cooling."""
+        if needs_heating and current < target:
+            if heating_rate is None or heating_rate < 0.05:
+                return None, 0.0
+            # Warm-up still to come: all of it unless this heated stretch has started warming
+            remaining_warm_up = warm_up or 0.0
+            if stretch is not None and stretch.heated:
+                if stretch.rise_at is not None:
+                    remaining_warm_up = 0.0
+                elif stretch.last is not None:
+                    elapsed = (stretch.last - stretch.start).total_seconds() / 60
+                    remaining_warm_up = max(0.0, remaining_warm_up - elapsed)
+            hours = (target - current) / heating_rate
+            return round(remaining_warm_up + hours * 60), self._confidence(room.heating_stretches, hours)
+        if not needs_heating and current > target:
+            if heat_loss is not None and outdoor is not None and target - outdoor > 0.5:
+                # Cooling slows as the room nears the outside temperature
+                hours = math.log((current - outdoor) / (target - outdoor)) / heat_loss
+                return round(hours * 60), self._confidence(room.heat_loss_stretches, hours)
+            if cooling_rate is not None and cooling_rate < -0.05:
+                hours = (current - target) / -cooling_rate
+                return round(hours * 60), self._confidence(room.cooling_stretches, hours)
+        return None, 0.0
+
+    def _confidence(self, stretches: int, hours: float) -> float:
+        confidence = min(0.9, 0.5 + 0.1 * (stretches - self.min_stretches))
+        if hours > 2:
+            confidence *= 0.7
+        return round(confidence, 2)
+
+    # -- storage ----------------------------------------------------------------
+
     def get_history_for_storage(self) -> dict:
-        """Get temperature history for persistence (last 10 entries per room).
+        """Learned figures for every room (not the stretch in progress)."""
+        return {
+            "format": STORAGE_FORMAT,
+            "rooms": {
+                zone_id: {room_id: room.to_dict() for room_id, room in rooms.items()}
+                for zone_id, rooms in self.rooms.items()
+            },
+        }
 
-        Returns:
-            Dictionary suitable for JSON storage
-        """
-        storage_data = {}
+    def restore_history(self, stored: dict) -> None:
+        """Restore learned figures. Data from before 3.6 (reading histories) is dropped:
+        its rates came from a method that read coarse sensors as not warming."""
+        if not isinstance(stored, dict) or stored.get("format") != STORAGE_FORMAT:
+            if stored:
+                _LOGGER.info("Heating analytics start afresh: older data isn't compatible")
+            return
+        for zone_id, rooms in (stored.get("rooms") or {}).items():
+            for room_id, data in (rooms or {}).items():
+                try:
+                    self.rooms.setdefault(zone_id, {})[room_id] = _Room.from_dict(data)
+                except (TypeError, ValueError, AttributeError) as err:
+                    _LOGGER.warning("Could not restore analytics for %s/%s: %s", zone_id, room_id, err)
 
-        for zone_id, zones in self.temp_history.items():
-            storage_data[zone_id] = {}
-            for room_id, history in zones.items():
-                # Keep only last 10 entries for storage efficiency
-                recent_history = list(history)[-10:] if len(history) > 10 else list(history)
-                storage_data[zone_id][room_id] = {
-                    "history": [entry.to_dict() for entry in recent_history],
-                    "smoothed_rates": self.smoothed_rates.get(zone_id, {}).get(room_id, {}),
-                }
 
-        return storage_data
+def _warm_up_and_climb(readings: list[tuple[float, float]]) -> tuple[float, float] | None:
+    """Fit a heated stretch as flat (radiators warming) bending into a straight climb.
 
-    def restore_history(self, stored_data: dict) -> None:
-        """Restore temperature history from storage.
+    The model is temperature = level + climb × max(0, time - bend). Every reading
+    time is tried as the bend and the best least-squares fit kept; running sums
+    keep it quick. Noise and coarse sensor steps barely move the bend, unlike
+    spotting the first rise. Returns (warm-up hours, climb in °C/h), or None if
+    there's no climb of at least RISE_THRESHOLD lasting at least MIN_RISE_SPAN.
+    """
+    n = len(readings)
+    if n < 3:
+        return None
+    min_span = MIN_RISE_SPAN.total_seconds() / 3600.0
+    total_y = sum(y for _, y in readings)
+    total_yy = sum(y * y for _, y in readings)
+    # Sums over readings k..n-1: count, t, t², y, t·y
+    suffix = [(0, 0.0, 0.0, 0.0, 0.0)] * (n + 1)
+    for i in range(n - 1, -1, -1):
+        t, y = readings[i]
+        c, st, stt, sy, sty = suffix[i + 1]
+        suffix[i] = (c + 1, st + t, stt + t * t, sy + y, sty + t * y)
+    best = None
+    end = readings[-1][0]
+    for k in range(n):
+        bend = readings[k][0]
+        if end - bend < min_span:
+            break
+        c, st, stt, sy, sty = suffix[k]
+        h = st - c * bend                              # Σ (t - bend) over the climb
+        hh = stt - 2 * bend * st + c * bend * bend     # Σ (t - bend)²
+        hy = sty - bend * sy                           # Σ y (t - bend)
+        det = n * hh - h * h
+        if det <= 1e-12:
+            continue
+        level = (total_y * hh - h * hy) / det
+        climb = (n * hy - h * total_y) / det
+        error = total_yy - level * total_y - climb * hy
+        if best is None or error < best[0] - 1e-12:
+            best = (error, bend, climb)
+    if best is None:
+        return None
+    _, bend, climb = best
+    # A real climb: the room warmed by at least one sensor step, not just noise
+    if climb * (end - bend) < RISE_THRESHOLD:
+        return None
+    return bend, climb
 
-        Args:
-            stored_data: Dictionary from get_history_for_storage()
-        """
-        for zone_id, zones in stored_data.items():
-            if zone_id not in self.temp_history:
-                self.temp_history[zone_id] = {}
-            if zone_id not in self.smoothed_rates:
-                self.smoothed_rates[zone_id] = {}
 
-            for room_id, room_data in zones.items():
-                # Restore history
-                self.temp_history[zone_id][room_id] = deque(maxlen=self.history_size)
-                for entry_dict in room_data.get("history", []):
-                    try:
-                        entry = TemperatureHistoryEntry.from_dict(entry_dict)
-                        self.temp_history[zone_id][room_id].append(entry)
-                    except Exception as err:
-                        _LOGGER.warning(
-                            "Could not restore history entry for %s/%s: %s",
-                            zone_id,
-                            room_id,
-                            err,
-                        )
-
-                # Restore smoothed rates (older storage may lack them or be partial)
-                stored_rates = room_data.get("smoothed_rates") or {}
-                self.smoothed_rates[zone_id][room_id] = {
-                    "heating_rate": stored_rates.get("heating_rate"),
-                    "cooling_rate": stored_rates.get("cooling_rate"),
-                }
-
-        _LOGGER.info("Restored temperature history for %d zones", len(stored_data))
+def _trend(rate: float | None) -> str:
+    if rate is None:
+        return "insufficient_data"
+    if rate > 1.0:
+        return "heating_rapidly"
+    if rate > 0.2:
+        return "heating_slowly"
+    if rate >= -0.2:
+        return "stable"
+    if rate >= -1.0:
+        return "cooling_slowly"
+    return "cooling_rapidly"

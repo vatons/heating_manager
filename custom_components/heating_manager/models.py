@@ -28,73 +28,36 @@ class TemperatureReading:
 
 @dataclass
 class HeatingAnalyticsData:
-    """Analytics data for a room's heating performance."""
+    """What's learned about a room's heating, and estimates from it."""
 
-    heating_rate: float | None  # °C per hour (positive = heating, negative = cooling)
-    cooling_rate: float | None  # °C per hour when not heating
-    eta_minutes: int | None  # Estimated minutes to reach target
-    eta_timestamp: datetime | None  # When target will be reached
-    confidence: float  # 0.0-1.0 confidence in prediction
-    samples_count: int  # Number of samples used for calculation
+    heating_rate: float | None          # °C/h once warming (None until enough stretches)
+    warm_up_minutes: int | None         # minutes from heat starting to the room warming
+    heating_stretches: int              # heated stretches learned from
+    cooling_rate: float | None          # °C/h without heat (negative when cooling)
+    heat_loss_per_degree: float | None  # °C/h lost per °C warmer than outside
+    cooling_stretches: int              # stretches without heat learned from
+    current_state: str | None           # "heated", "not_heated" or None
+    current_minutes: int | None         # how long the current stretch has lasted
+    rate_so_far: float | None           # °C/h in the current stretch
     trend: str  # "heating_rapidly", "heating_slowly", "stable", "cooling_slowly", "cooling_rapidly", "insufficient_data"
+    eta_minutes: int | None             # minutes until the target is reached
+    eta_timestamp: datetime | None
+    confidence: float                   # 0.0-1.0
 
     def to_dict(self) -> dict:
-        """Convert to dictionary for storage/transmission."""
+        """Convert to a dictionary for the room's data."""
         return {
             "heating_rate": self.heating_rate,
+            "warm_up_minutes": self.warm_up_minutes,
+            "heating_stretches": self.heating_stretches,
             "cooling_rate": self.cooling_rate,
+            "heat_loss_per_degree": self.heat_loss_per_degree,
+            "cooling_stretches": self.cooling_stretches,
+            "current_state": self.current_state,
+            "current_minutes": self.current_minutes,
+            "rate_so_far": self.rate_so_far,
+            "trend": self.trend,
             "eta_minutes": self.eta_minutes,
             "eta_timestamp": self.eta_timestamp.isoformat() if self.eta_timestamp else None,
             "confidence": self.confidence,
-            "samples_count": self.samples_count,
-            "trend": self.trend,
         }
-
-
-@dataclass
-class TemperatureHistoryEntry:
-    """Single entry in temperature history for analytics."""
-
-    timestamp: datetime
-    temperature: float
-    needs_heating: bool
-    # Whether the zone's heat source was heating (None: not known, e.g. older history)
-    heat_flowing: bool | None = None
-
-    @property
-    def heated(self) -> bool:
-        """Heat was going into the room: it wanted heat and the heat source was on."""
-        return self.needs_heating and self.heat_flowing is not False
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary for storage."""
-        return {
-            "timestamp": self.timestamp.isoformat(),
-            "temperature": self.temperature,
-            "needs_heating": self.needs_heating,
-            "heat_flowing": self.heat_flowing,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "TemperatureHistoryEntry":
-        """Create from dictionary (for restoration from storage)."""
-        from homeassistant.util import dt as dt_util
-
-        timestamp_raw = data.get("timestamp")
-        if not timestamp_raw:
-            raise ValueError(f"Missing 'timestamp' in history entry: {data}")
-        timestamp = dt_util.parse_datetime(timestamp_raw)
-        if timestamp is None:
-            raise ValueError(f"Unparseable 'timestamp' in history entry: {timestamp_raw!r}")
-
-        temperature = data.get("temperature")
-        if temperature is None:
-            raise ValueError(f"Missing 'temperature' in history entry: {data}")
-
-        heat_flowing = data.get("heat_flowing")
-        return cls(
-            timestamp=timestamp,
-            temperature=float(temperature),
-            needs_heating=bool(data.get("needs_heating", False)),
-            heat_flowing=None if heat_flowing is None else bool(heat_flowing),
-        )

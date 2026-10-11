@@ -36,7 +36,6 @@ from homeassistant.util import slugify
 
 from .const import (
     CONF_ANALYTICS_ENABLED,
-    CONF_ANALYTICS_HISTORY_SIZE,
     CONF_ANALYTICS_MIN_SAMPLES,
     CONF_BOOST_DURATION,
     CONF_DERIVATIVE_SMOOTHING,
@@ -50,6 +49,7 @@ from .const import (
     CONF_MINIMUM_TEMP,
     CONF_HEAT_SOURCE,
     CONF_MONITORING_ONLY,
+    CONF_OUTDOOR_TEMPERATURE,
     CONF_ROOMS,
     CONF_SCHEDULE,
     CONF_SENSORS,
@@ -67,7 +67,6 @@ from .const import (
     CONF_WEEKEND,
     CONF_ZONES,
     DEFAULT_ANALYTICS_ENABLED,
-    DEFAULT_ANALYTICS_HISTORY_SIZE,
     DEFAULT_ANALYTICS_MIN_SAMPLES,
     DEFAULT_BOOST_DURATION,
     DEFAULT_DERIVATIVE_SMOOTHING,
@@ -109,7 +108,7 @@ class SettingSpec:
 
     key: str
     default: Any
-    kind: str                      # "float", "int", "bool" or "select"
+    kind: str                      # "float", "int", "bool", "select" or "entity" ("" = none)
     advanced: bool = False
     minimum: float | None = None
     maximum: float | None = None
@@ -124,6 +123,7 @@ SETTINGS: tuple[SettingSpec, ...] = (
     SettingSpec(CONF_FROST_PROTECTION_TEMP, DEFAULT_FROST_PROTECTION_TEMP, "float", minimum=1, maximum=15, step=0.5, unit="°C"),
     SettingSpec(CONF_HEATING_DEMAND_MODE, DEFAULT_HEATING_DEMAND_MODE, "select", options=tuple(HEATING_DEMAND_MODES)),
     SettingSpec(CONF_FALLBACK_MODE, DEFAULT_FALLBACK_MODE, "select", options=tuple(FALLBACK_MODES)),
+    SettingSpec(CONF_OUTDOOR_TEMPERATURE, "", "entity"),
     SettingSpec(CONF_HEATING_DEADBAND, DEFAULT_HEATING_DEADBAND, "float", minimum=0.1, maximum=5, step=0.1, unit="°C"),
     SettingSpec(CONF_BOOST_DURATION, DEFAULT_BOOST_DURATION, "int", minimum=1, maximum=480, step=1, unit="min"),
     # Advanced
@@ -136,7 +136,6 @@ SETTINGS: tuple[SettingSpec, ...] = (
     SettingSpec(CONF_TRV_COOLDOWN_OFFSET, DEFAULT_TRV_COOLDOWN_OFFSET, "float", True, 0, 5, 0.5, "°C"),
     SettingSpec(CONF_TRV_OFFSET_EMA_ALPHA, DEFAULT_TRV_OFFSET_EMA_ALPHA, "float", True, 0.01, 1, 0.01),
     SettingSpec(CONF_ANALYTICS_ENABLED, DEFAULT_ANALYTICS_ENABLED, "bool", True),
-    SettingSpec(CONF_ANALYTICS_HISTORY_SIZE, DEFAULT_ANALYTICS_HISTORY_SIZE, "int", True, 5, 500, 1),
     SettingSpec(CONF_ANALYTICS_MIN_SAMPLES, DEFAULT_ANALYTICS_MIN_SAMPLES, "int", True, 2, 50, 1),
     SettingSpec(CONF_DERIVATIVE_SMOOTHING, DEFAULT_DERIVATIVE_SMOOTHING, "float", True, 0.01, 1, 0.01),
 )
@@ -158,6 +157,8 @@ def coerce_setting(spec: SettingSpec, value: Any) -> Any:
             return bool(value)
         if spec.kind == "select":
             return value if value in spec.options else spec.default
+        if spec.kind == "entity":
+            return value if isinstance(value, str) and (value == "" or "." in value) else spec.default
         number = int(value) if spec.kind == "int" else float(value)
     except (TypeError, ValueError):
         _LOGGER.warning("Invalid value %r for %s, using default %r", value, spec.key, spec.default)

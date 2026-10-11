@@ -510,7 +510,8 @@ async def test_heating_rate_not_distorted_by_clock_change(hass, zone, freezer):
     for minute in range(1, 121):
         set_room("lounge", 18.0 + 0.02 * minute)
         await tick()
-    rate = room_of(coordinator, "lounge")["heating_analytics"]["heating_rate"]
+    # The heating stretch in progress (learned rates only update when it ends)
+    rate = room_of(coordinator, "lounge")["heating_analytics"]["rate_so_far"]
     assert rate == pytest.approx(1.2, abs=0.15)
 
 

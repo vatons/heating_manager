@@ -67,10 +67,12 @@
           "sensors": {
             "name": "Sensors",
             "data": {
-              "fallback_mode": "When a room's sensors are unavailable"
+              "fallback_mode": "When a room's sensors are unavailable",
+              "outdoor_temperature": "Outdoor temperature"
             },
             "data_description": {
-              "fallback_mode": "Used when a room has no sensor reading from the last 30 minutes."
+              "fallback_mode": "Used when a room has no sensor reading from the last 30 minutes.",
+              "outdoor_temperature": "Optional. A temperature sensor or weather entity for the outside temperature, shared by all rooms. Lets analytics learn how quickly each room loses heat to the outside, so cooling estimates follow the weather."
             }
           },
           "boost": {
@@ -104,15 +106,13 @@
             "name": "Analytics",
             "data": {
               "analytics_enabled": "Heating analytics",
-              "analytics_history_size": "Analytics history size",
-              "analytics_min_samples": "Analytics minimum samples",
-              "derivative_smoothing_factor": "Analytics smoothing"
+              "analytics_min_samples": "Analytics minimum stretches",
+              "derivative_smoothing_factor": "Analytics learning rate"
             },
             "data_description": {
-              "analytics_enabled": "Track heating and cooling rates and estimate time to reach target.",
-              "analytics_history_size": "Readings kept per room for analytics.",
-              "analytics_min_samples": "Readings needed before rates are estimated.",
-              "derivative_smoothing_factor": "Smoothing applied to heating/cooling rates (higher = more responsive)."
+              "analytics_enabled": "Learn each room's heating and cooling rates and warm-up time, and estimate time to reach target.",
+              "analytics_min_samples": "Heating or cooling stretches a room needs before its rate is shown.",
+              "derivative_smoothing_factor": "How much each new stretch moves a room's learned rates (higher = adapts faster)."
             },
             "description": "Advanced."
           },

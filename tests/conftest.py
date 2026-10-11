@@ -33,7 +33,6 @@ from pytest_homeassistant_custom_component.common import (
 from custom_components.heating_manager.coordinator import HeatingManagerCoordinator
 from custom_components.heating_manager.entry_data import zones_to_subentries
 from custom_components.heating_manager.const import (
-    DEFAULT_ANALYTICS_HISTORY_SIZE,
     DEFAULT_ANALYTICS_MIN_SAMPLES,
     DEFAULT_BOOST_DURATION,
     DEFAULT_DERIVATIVE_SMOOTHING,
@@ -247,7 +246,6 @@ async def make_coordinator(hass: HomeAssistant):
             trv_cooldown_offset=DEFAULT_TRV_COOLDOWN_OFFSET,
             trv_offset_ema_alpha=DEFAULT_TRV_OFFSET_EMA_ALPHA,
             analytics_enabled=True,
-            analytics_history_size=DEFAULT_ANALYTICS_HISTORY_SIZE,
             analytics_min_samples=DEFAULT_ANALYTICS_MIN_SAMPLES,
             derivative_smoothing=DEFAULT_DERIVATIVE_SMOOTHING,
         )

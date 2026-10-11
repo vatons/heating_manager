@@ -9,8 +9,6 @@ import pytest
 
 from homeassistant.core import HomeAssistant
 
-from custom_components.heating_manager.heating_analytics import HeatingAnalytics
-from custom_components.heating_manager.models import TemperatureHistoryEntry
 
 from .conftest import ALL_DAY_19, FakeTRV, entry_from_options, local_dt, make_config, make_room, set_temp
 from .test_config_flow import edit_zone, setup_entry, zones
@@ -48,8 +46,9 @@ def room(coordinator):
     return coordinator.data["zone_1"]["rooms"]["room"]
 
 
-def history(coordinator):
-    return list(coordinator.heating_analytics.temp_history["zone_1"]["room"])
+def analytics_state(coordinator, room_id="room"):
+    """The stretch the analytics are in for a room: "heated" or "not_heated"."""
+    return coordinator.data["zone_1"]["rooms"][room_id]["heating_analytics"]["current_state"]
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +108,7 @@ async def test_heat_source_off_while_the_room_wants_heat(hass, add_trvs, make_co
     assert (zone(coordinator)["heat_flowing"], zone(coordinator)["heat_flowing_basis"]) == (False, "heat_source")
     assert room(coordinator)["needs_heating"] is True
     assert room(coordinator)["heated"] is False                     # ...but none is coming
-    assert history(coordinator)[-1].heat_flowing is False
+    assert analytics_state(coordinator) == "not_heated"            # learned as cooling
 
     hass.states.async_set(BOILER, "on")
     await refresh(coordinator)
@@ -143,8 +142,7 @@ async def test_room_wanting_heat_in_a_zone_that_doesnt_call(hass, add_trvs, make
     assert cold["needs_heating"] is True
     assert zone(coordinator)["heating_demand"] is False
     assert cold["heated"] is False
-    entry = coordinator.heating_analytics.temp_history["zone_1"]["cold"][-1]
-    assert (entry.needs_heating, entry.heat_flowing, entry.heated) == (True, False, False)
+    assert analytics_state(coordinator, "cold") == "not_heated"
 
 
 async def test_heat_source_listed_when_missing(hass, add_trvs, make_coordinator, freezer):
@@ -162,53 +160,7 @@ async def test_heat_source_listed_when_missing(hass, add_trvs, make_coordinator,
     assert "switch.no_such_boiler (heat source of Zone 1)" in issue.translation_placeholders["entities"]
 
 
-# ---------------------------------------------------------------------------
-# Analytics
-# ---------------------------------------------------------------------------
-
-T0 = local_dt(hour=8)
-
-
-def feed(analytics, readings, start=T0, step=timedelta(minutes=1)):
-    """readings: (temperature, needs_heating, heat_flowing)."""
-    for i, (temp, needs, flowing) in enumerate(readings):
-        analytics.record_temperature("z", "r", temp, needs, start + i * step, heat_flowing=flowing)
-
-
-def test_heating_rate_only_while_heat_flows():
-    analytics = HeatingAnalytics(history_size=30, min_samples=3, smoothing=0.3)
-    feed(analytics, [
-        # Each interval belongs to the reading at its start
-        (18.00, True, True), (18.05, True, True), (18.10, True, True),     # heating: +3 °C/h
-        (18.15, True, False), (18.14, True, False), (18.13, True, False),  # wants heat, boiler off: -0.6 °C/h
-        (18.12, True, True), (18.17, True, True), (18.22, True, True),
-    ])
-    assert analytics.calculate_heating_rate("z", "r") == pytest.approx(3.0)
-    # The boiler-off intervals count as cooling, not as (slow) heating
-    assert analytics.calculate_cooling_rate("z", "r") == pytest.approx(-0.6)
-
-
-def test_rate_intervals_belong_to_the_earlier_reading():
-    """The interval after the last heated reading is heating, even though the next reading isn't."""
-    analytics = HeatingAnalytics(history_size=30, min_samples=2, smoothing=0.3)
-    feed(analytics, [(18.0, True, True), (18.05, False, False)])
-    assert analytics.calculate_heating_rate("z", "r") == pytest.approx(3.0)
-    assert analytics.calculate_cooling_rate("z", "r") is None
-
-
-def test_long_gaps_are_not_used():
-    analytics = HeatingAnalytics(history_size=30, min_samples=2, smoothing=0.3)
-    analytics.record_temperature("z", "r", 18.0, True, T0, heat_flowing=True)
-    analytics.record_temperature("z", "r", 20.0, True, T0 + timedelta(hours=2), heat_flowing=True)
-    assert analytics.calculate_heating_rate("z", "r") is None
-
-
-def test_old_history_without_heat_flowing_still_counts():
-    entry = TemperatureHistoryEntry.from_dict({"timestamp": T0.isoformat(), "temperature": 18.0, "needs_heating": True})
-    assert entry.heat_flowing is None
-    assert entry.heated is True
-    restored = TemperatureHistoryEntry.from_dict(entry.to_dict())
-    assert restored.heat_flowing is None
+# Splitting readings into heated / not heated stretches is tested in test_heating_analytics.py
 
 
 # ---------------------------------------------------------------------------
