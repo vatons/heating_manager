@@ -10,6 +10,9 @@ from .models import HeatingAnalyticsData, TemperatureHistoryEntry
 
 _LOGGER = logging.getLogger(__name__)
 
+# Readings further apart than this (e.g. across a restart) aren't used for a rate
+MAX_SAMPLE_GAP = timedelta(minutes=30)
+
 
 class HeatingAnalytics:
     """Tracks temperature history and calculates heating performance metrics."""
@@ -39,6 +42,7 @@ class HeatingAnalytics:
         temp: float,
         needs_heating: bool,
         timestamp: datetime | None = None,
+        heat_flowing: bool | None = None,
     ) -> None:
         """Record a temperature reading for history tracking.
 
@@ -48,6 +52,9 @@ class HeatingAnalytics:
             temp: Temperature reading
             needs_heating: Whether the room currently needs heating
             timestamp: Timestamp of reading (defaults to now)
+            heat_flowing: Whether the zone's heat source is heating (None if unknown).
+                The room counts as heated until the next reading only when it
+                wants heat and heat is flowing.
         """
         # Stored in UTC so rates aren't distorted by a daylight-saving change
         timestamp = dt_util.utcnow() if timestamp is None else dt_util.as_utc(timestamp)
@@ -60,16 +67,18 @@ class HeatingAnalytics:
 
         # Add entry to history
         entry = TemperatureHistoryEntry(
-            timestamp=timestamp, temperature=temp, needs_heating=needs_heating
+            timestamp=timestamp, temperature=temp, needs_heating=needs_heating,
+            heat_flowing=heat_flowing,
         )
         self.temp_history[zone_id][room_id].append(entry)
 
         _LOGGER.debug(
-            "Recorded temperature for %s/%s: %.1f°C (needs_heating=%s)",
+            "Recorded temperature for %s/%s: %.1f°C (needs_heating=%s, heat_flowing=%s)",
             zone_id,
             room_id,
             temp,
             needs_heating,
+            heat_flowing,
         )
 
     def _calculate_derivative(
@@ -77,12 +86,17 @@ class HeatingAnalytics:
     ) -> float | None:
         """Calculate temperature derivative (rate of change) in °C/hour.
 
+        Each rate is taken between two consecutive readings, and belongs to the
+        state at the first of them (what the room was doing until the next).
+        So a heating rate only covers time the room wanted heat while the heat
+        source was on, and a cooling rate time without heat going in.
+
         Args:
             zone_id: Zone identifier
             room_id: Room identifier
-            heating_filter: If True, only use readings when needs_heating=True
-                          If False, only use readings when needs_heating=False
-                          If None, use all readings
+            heating_filter: If True, only intervals when the room was heated
+                          If False, only intervals when it wasn't
+                          If None, all intervals
 
         Returns:
             Temperature change rate in °C/hour, or None if insufficient data
@@ -90,28 +104,21 @@ class HeatingAnalytics:
         if zone_id not in self.temp_history or room_id not in self.temp_history[zone_id]:
             return None
 
-        history = self.temp_history[zone_id][room_id]
+        history = list(self.temp_history[zone_id][room_id])
 
-        # Filter history based on heating_filter
-        if heating_filter is not None:
-            filtered_history = [e for e in history if e.needs_heating == heating_filter]
-        else:
-            filtered_history = list(history)
-
-        if len(filtered_history) < self.min_samples:
-            return None
-
-        # Calculate derivatives between consecutive points
         derivatives = []
-        for i in range(1, len(filtered_history)):
-            prev_entry = filtered_history[i - 1]
-            curr_entry = filtered_history[i]
+        for prev_entry, curr_entry in zip(history, history[1:]):
+            if heating_filter is not None and prev_entry.heated != heating_filter:
+                continue
+            gap = curr_entry.timestamp - prev_entry.timestamp
+            if gap <= timedelta(0) or gap > MAX_SAMPLE_GAP:
+                continue
+            time_diff_hours = gap.total_seconds() / 3600.0
+            derivatives.append((curr_entry.temperature - prev_entry.temperature) / time_diff_hours)
 
-            time_diff_hours = (curr_entry.timestamp - prev_entry.timestamp).total_seconds() / 3600.0
-            if time_diff_hours > 0:
-                temp_diff = curr_entry.temperature - prev_entry.temperature
-                derivative = temp_diff / time_diff_hours
-                derivatives.append(derivative)
+        # min_samples readings give min_samples - 1 intervals
+        if len(derivatives) < max(1, self.min_samples - 1):
+            return None
 
         if not derivatives:
             return None

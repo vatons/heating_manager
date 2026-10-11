@@ -29,6 +29,7 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_END,
+    CONF_HEAT_SOURCE,
     CONF_HEATING_DEMAND_MODE,
     CONF_MONITORING_ONLY,
     CONF_ROOMS,
@@ -141,6 +142,11 @@ PERIODS_SELECTOR = selector.ObjectSelector(
             },
         },
     )
+)
+
+# Optional: an entity that's on while the boiler (or other heat source) heats the zone
+HEAT_SOURCE_SELECTOR = selector.EntitySelector(
+    selector.EntitySelectorConfig(domain=["binary_sensor", "switch", "input_boolean", "climate"])
 )
 
 # A zone's rooms: an editable list, each room edited in its own dialog
@@ -297,12 +303,15 @@ def _zone_form_values(data: dict) -> dict:
             CONF_SAME: same,
             CONF_PERIODS: [] if same else _periods_for_form(schedule.get(CONF_WEEKEND, [])),
         },
-        CONF_ADVANCED: {CONF_LAST_SEEN: [
-            {"temperature": sensor["temperature"], CONF_LAST_SEEN: sensor[CONF_LAST_SEEN]}
-            for room in rooms
-            for sensor in room.get(CONF_SENSORS) or []
-            if sensor.get(CONF_LAST_SEEN)
-        ]},
+        CONF_ADVANCED: {
+            **({CONF_HEAT_SOURCE: data[CONF_HEAT_SOURCE]} if data.get(CONF_HEAT_SOURCE) else {}),
+            CONF_LAST_SEEN: [
+                {"temperature": sensor["temperature"], CONF_LAST_SEEN: sensor[CONF_LAST_SEEN]}
+                for room in rooms
+                for sensor in room.get(CONF_SENSORS) or []
+                if sensor.get(CONF_LAST_SEEN)
+            ],
+        },
     }
 
 
@@ -342,9 +351,13 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
             ),
             vol.Required(CONF_ADVANCED): section(
                 vol.Schema({
+                    vol.Optional(
+                        CONF_HEAT_SOURCE,
+                        description={"suggested_value": advanced.get(CONF_HEAT_SOURCE)},
+                    ): HEAT_SOURCE_SELECTOR,
                     vol.Optional(CONF_LAST_SEEN, default=list(advanced.get(CONF_LAST_SEEN) or [])): LAST_SEEN_SELECTOR,
                 }),
-                {"collapsed": not advanced.get(CONF_LAST_SEEN)},
+                {"collapsed": not (advanced.get(CONF_LAST_SEEN) or advanced.get(CONF_HEAT_SOURCE))},
             ),
         })
 
@@ -430,6 +443,8 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
         }
         if user_input.get(CONF_HEATING_DEMAND_MODE) in HEATING_DEMAND_MODES:
             data[CONF_HEATING_DEMAND_MODE] = user_input[CONF_HEATING_DEMAND_MODE]
+        if heat_source := (user_input.get(CONF_ADVANCED) or {}).get(CONF_HEAT_SOURCE):
+            data[CONF_HEAT_SOURCE] = heat_source
         if user_input.get(CONF_MONITORING_ONLY):
             data[CONF_MONITORING_ONLY] = True
         return data, errors, placeholders

@@ -66,7 +66,7 @@ Everything is set up in the Home Assistant UI; no YAML is needed. Requires Home 
      - **Rooms**: add, edit, reorder or delete rooms. Each room has a name, its TRVs, its temperature sensors and an optional temperature offset. A TRV can belong to one room only.
      - **Heating demand mode** and **Monitoring only**
      - **Weekday schedule** and **Weekend schedule**: add, edit, reorder or delete periods (start, end, temperature); turn on **Same as weekdays** to use one schedule all week. Periods on the same day can't overlap: the form names the two that clash.
-     - **Advanced**: pair temperature sensors with separate "last seen" entities.
+     - **Advanced**: the zone's **heat source** (optional, see [Heat source](#heat-source)), and pairs of temperature sensors with separate "last seen" entities.
    - **Configure** has **Settings** (one form: temperatures, heating demand, boiler protection, sensors and boost, with TRV control, analytics and update interval in collapsed sections; the defaults suit most homes) and **Import from YAML file**.
 
 Changes apply as soon as you submit a form.
@@ -689,6 +689,30 @@ heating_analytics:
 
 **Disabling analytics:**
 If you don't need this feature, turn off **Heating analytics** in **Configure → Settings → Analytics** to reduce storage and processing.
+
+#### Heat source
+
+Heating Manager only asks for heat; your boiler automation decides whether the boiler runs. So the heating rate is learned only while heat is actually going into a room: the room wants heat **and** the zone's heat source is on. Time when a room wants heat but none arrives (a zone in `zone_average` mode that isn't calling, the minimum boiler off time, your boiler automation or the boiler's own timer, hot water priority) counts towards the cooling rate instead.
+
+To tell Heating Manager when the heat source is on, set **Heat source** under **Advanced** in the zone's form:
+- a switch, binary sensor or input boolean that's on while the boiler is heating (e.g. a boiler relay, or an OpenTherm flame sensor), or
+- a climate entity whose `hvac_action` is `heating` (e.g. the boiler's own thermostat).
+
+Without one, or while it's unavailable, the zone's own call for heat (after the minimum boiler on/off times) is used. The zone entity shows `heat_flowing` and `heat_flowing_basis` (`heat_source` or `zone_demand`), and each room shows `heated`.
+
+#### TRV offsets while heated and not heated
+
+A TRV's own sensor sits near the radiator, so it reads warmer than the room while the radiator is hot than while it's cold. Learning one offset from both may make it smaller than it should be while heating, so a TRV could shut a little early. To check before changing anything, each TRV also learns two offsets for comparison: one from readings while heat was going into the room, one from the rest. They don't affect control. They're in the room entity's `trv_control.trvs` attributes:
+
+```yaml
+learned_offset: 2.1            # used for control: every reading
+learned_offset_heated: 3.4     # while heated
+learned_offset_unheated: 1.2   # while not heated
+samples_heated: 412
+samples_unheated: 980
+```
+
+After a few days of normal heating (a few hundred samples of each), a large gap between the two means the TRVs would be better controlled with the heated offset.
 
 ### Heating Demand Modes
 

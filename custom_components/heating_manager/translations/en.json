@@ -197,11 +197,13 @@
             },
             "advanced": {
               "name": "Advanced",
-              "description": "Last seen sensors",
+              "description": "Heat source and last seen sensors",
               "data": {
+                "heat_source": "Heat source",
                 "last_seen": "Last seen sensors"
               },
               "data_description": {
+                "heat_source": "Optional. An entity that's on while your boiler or heat pump is heating this zone: a switch or binary sensor (e.g. a boiler relay or OpenTherm flame sensor), or a thermostat whose action is 'heating'. Used to learn how fast rooms heat up only while heat actually flows. Without it, the zone's own call for heat is used.",
                 "last_seen": "Optional. Pair a room's temperature sensor with a separate timestamp entity (e.g. Zigbee2MQTT last_seen), to spot dead sensors sooner."
               }
             }
@@ -242,11 +244,13 @@
             },
             "advanced": {
               "name": "Advanced",
-              "description": "Last seen sensors",
+              "description": "Heat source and last seen sensors",
               "data": {
+                "heat_source": "Heat source",
                 "last_seen": "Last seen sensors"
               },
               "data_description": {
+                "heat_source": "Optional. An entity that's on while your boiler or heat pump is heating this zone: a switch or binary sensor (e.g. a boiler relay or OpenTherm flame sensor), or a thermostat whose action is 'heating'. Used to learn how fast rooms heat up only while heat actually flows. Without it, the zone's own call for heat is used.",
                 "last_seen": "Optional. Pair a room's temperature sensor with a separate timestamp entity (e.g. Zigbee2MQTT last_seen), to spot dead sensors sooner."
               }
             }

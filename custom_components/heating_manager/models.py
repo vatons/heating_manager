@@ -58,6 +58,13 @@ class TemperatureHistoryEntry:
     timestamp: datetime
     temperature: float
     needs_heating: bool
+    # Whether the zone's heat source was heating (None: not known, e.g. older history)
+    heat_flowing: bool | None = None
+
+    @property
+    def heated(self) -> bool:
+        """Heat was going into the room: it wanted heat and the heat source was on."""
+        return self.needs_heating and self.heat_flowing is not False
 
     def to_dict(self) -> dict:
         """Convert to dictionary for storage."""
@@ -65,6 +72,7 @@ class TemperatureHistoryEntry:
             "timestamp": self.timestamp.isoformat(),
             "temperature": self.temperature,
             "needs_heating": self.needs_heating,
+            "heat_flowing": self.heat_flowing,
         }
 
     @classmethod
@@ -83,8 +91,10 @@ class TemperatureHistoryEntry:
         if temperature is None:
             raise ValueError(f"Missing 'temperature' in history entry: {data}")
 
+        heat_flowing = data.get("heat_flowing")
         return cls(
             timestamp=timestamp,
             temperature=float(temperature),
             needs_heating=bool(data.get("needs_heating", False)),
+            heat_flowing=None if heat_flowing is None else bool(heat_flowing),
         )

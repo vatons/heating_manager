@@ -48,6 +48,7 @@ from .const import (
     CONF_MIN_BOILER_OFF_TIME,
     CONF_MIN_BOILER_ON_TIME,
     CONF_MINIMUM_TEMP,
+    CONF_HEAT_SOURCE,
     CONF_MONITORING_ONLY,
     CONF_ROOMS,
     CONF_SCHEDULE,
@@ -388,6 +389,8 @@ def zone_subentry(zone_id: str, zone: dict, rooms: list[dict] | None = None) -> 
         data[CONF_HEATING_DEMAND_MODE] = zone[CONF_HEATING_DEMAND_MODE]
     if zone.get(CONF_MONITORING_ONLY):
         data[CONF_MONITORING_ONLY] = True
+    if zone.get(CONF_HEAT_SOURCE):
+        data[CONF_HEAT_SOURCE] = zone[CONF_HEAT_SOURCE]
     return {"subentry_type": SUBENTRY_ZONE, "title": zone_title(data), "unique_id": zone_id, "data": data}
 
 
@@ -447,7 +450,7 @@ def entry_to_runtime(entry: Any) -> tuple[dict, dict]:
             CONF_ROOMS: {},
             "subentry_id": sub.subentry_id,
         }
-        for key in (CONF_HEATING_DEMAND_MODE, CONF_MONITORING_ONLY):
+        for key in (CONF_HEATING_DEMAND_MODE, CONF_MONITORING_ONLY, CONF_HEAT_SOURCE):
             if data.get(key):
                 zone[key] = data[key]
         for room in data.get(CONF_ROOMS) or []:
@@ -593,6 +596,8 @@ def yaml_to_options(heating_config: dict, conf: dict | None = None) -> dict[str,
             zone_options[CONF_HEATING_DEMAND_MODE] = zone[CONF_HEATING_DEMAND_MODE]
         if zone.get(CONF_MONITORING_ONLY) is True:
             zone_options[CONF_MONITORING_ONLY] = True
+        if isinstance(zone.get(CONF_HEAT_SOURCE), str) and "." in zone[CONF_HEAT_SOURCE]:
+            zone_options[CONF_HEAT_SOURCE] = zone[CONF_HEAT_SOURCE]
         rooms = zone.get(CONF_ROOMS) or {}
         if isinstance(rooms, dict):
             for room_id, room in rooms.items():

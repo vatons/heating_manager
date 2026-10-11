@@ -12,6 +12,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_HEAT_SOURCE,
     CONF_HEATING_DEMAND_MODE,
     CONF_MONITORING_ONLY,
     CONF_ROOMS,
@@ -142,6 +143,8 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         self._loaded_state = False
         self._zone_heating_start: dict[str, Any] = {}  # zone_id -> datetime when demand started
         self.rooms_off: dict[str, list[str]] = {}  # zone_id -> room_ids switched off by the user
+        # zone_id -> room_id -> whether heat was going into the room at the last update
+        self._room_heated: dict[str, dict[str, bool]] = {}
         # zone_id -> room_id -> boost minutes, set on the room's boost duration entity
         self.boost_durations: dict[str, dict[str, int]] = {}
         self._missing_since: dict[str, datetime] = {}  # entity_id -> first seen missing (UTC)
@@ -327,26 +330,14 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                             zone_id, room_id, room_config, target_temp, room_temp, needs_heating,
                             # Only learn TRV offsets against the room's own sensors
                             learn_offset=temp_metadata["source"] == "local_sensors",
+                            # Heat going in since the last update, for the comparison offsets
+                            radiator_heated=self._room_heated.get(zone_id, {}).get(room_id),
                         )
 
                     # Collect TRV offset information for display
                     trv_offset_info = await self.trv_manager.get_trv_offset_info(
                         self.hass, zone_id, room_id, room_config, room_temp
                     )
-
-                    # Record temperature for analytics (if enabled and temp is valid)
-                    if self.heating_analytics is not None and room_temp is not None:
-                        self.heating_analytics.record_temperature(
-                            zone_id, room_id, room_temp, needs_heating, current_time
-                        )
-
-                        # Get analytics data
-                        analytics_data = self.heating_analytics.get_analytics(
-                            zone_id, room_id, room_temp, target_temp, needs_heating
-                        )
-                        analytics_dict = analytics_data.to_dict()
-                    else:
-                        analytics_dict = None
 
                     # Extract sensor entity IDs for backwards compatibility in attributes
                     sensor_entity_ids = self.temperature_manager.get_sensor_entity_ids(room_config)
@@ -364,7 +355,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                         "sensors_status": temp_metadata["sensors_status"],
                         "temperature_last_seen": temp_metadata["last_seen"],
                         "trv_offset_info": trv_offset_info,
-                        "heating_analytics": analytics_dict,
+                        "heating_analytics": None,  # filled in once the zone's demand is known
                         "manual_room_override": {
                             "active": (
                                 zone_id in self.manual_room_temp
@@ -397,6 +388,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                         self.min_boiler_on_time, self.min_boiler_off_time,
                     )
                 zone_data["heating_demand_mode"] = zone_demand_mode
+                self._update_heat_flow(zone_id, zone_config, zone_data, current_time)
                 zone_data["manual_zone_override"] = {
                     "active": zone_id in self.manual_zone_temp,
                     "temperature": self.manual_zone_temp.get(zone_id, {}).get("temperature"),
@@ -575,6 +567,57 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             base = max(base, room_temp)
         return base + DEFAULT_BOOST_TEMP_INCREASE
 
+    def heat_source_state(self, entity_id: str | None) -> bool | None:
+        """Whether a zone's heat source entity says it's heating; None if unknown.
+
+        On/off entities (switch, binary_sensor, input_boolean) are heating when
+        on; a climate entity when its hvac_action is heating.
+        """
+        if not entity_id:
+            return None
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in ("unavailable", "unknown"):
+            return None
+        if entity_id.startswith("climate."):
+            action = state.attributes.get("hvac_action")
+            if action is None:
+                return None
+            return action in ("heating", "preheating")
+        return state.state == "on"
+
+    def _update_heat_flow(self, zone_id: str, zone_config: dict, zone_data: dict, current_time) -> None:
+        """Work out whether heat is going into each room, and record analytics with it.
+
+        Heat flows to a room when it wants heat and the zone's heat source is on:
+        the configured heat source entity, else the zone's own (held) call for heat.
+        """
+        heat_source = zone_config.get(CONF_HEAT_SOURCE)
+        source_state = self.heat_source_state(heat_source)
+        if source_state is None:
+            heat_flowing = bool(zone_data["heating_demand"])
+            basis = "zone_demand"
+        else:
+            heat_flowing = source_state
+            basis = "heat_source"
+        zone_data["heat_source"] = heat_source
+        zone_data["heat_flowing"] = heat_flowing
+        zone_data["heat_flowing_basis"] = basis
+
+        for room_id, room_data in zone_data["rooms"].items():
+            heated = bool(room_data["needs_heating"]) and heat_flowing
+            room_data["heated"] = heated
+            self._room_heated.setdefault(zone_id, {})[room_id] = heated
+            room_temp = room_data["temperature"]
+            if self.heating_analytics is None or room_temp is None:
+                continue
+            self.heating_analytics.record_temperature(
+                zone_id, room_id, room_temp, room_data["needs_heating"], current_time,
+                heat_flowing=heat_flowing,
+            )
+            room_data["heating_analytics"] = self.heating_analytics.get_analytics(
+                zone_id, room_id, room_temp, room_data["target_temperature"], room_data["needs_heating"]
+            ).to_dict()
+
     @callback
     def _async_check_missing_entities(self, zones: dict) -> None:
         """Raise a repair issue for configured TRVs/sensors that don't exist or are disabled.
@@ -587,6 +630,8 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         ent_reg = er.async_get(self.hass)
         references: dict[str, str] = {}
         for zone_id, zone in zones.items():
+            if isinstance(zone, dict) and zone.get(CONF_HEAT_SOURCE):
+                references.setdefault(zone[CONF_HEAT_SOURCE], f"heat source of {zone.get('name', zone_id)}")
             rooms = zone.get(CONF_ROOMS) if isinstance(zone, dict) else None
             if not isinstance(rooms, dict):
                 continue
@@ -862,6 +907,9 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             # Restore TRV offset history
             trv_offset_history = data.get("trv_offset_history", {})
             self.trv_controller.restore_offset_history(trv_offset_history)
+            stored_by_heat = data.get("trv_offset_by_heat")
+            if isinstance(stored_by_heat, dict):
+                self.trv_controller.offset_by_heat = stored_by_heat
 
             # Restore analytics history (if analytics enabled)
             if self.heating_analytics is not None:
@@ -888,6 +936,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             "boost_durations": self.boost_durations,
             "room_heating_state": self.heating_logic.get_state_for_storage(),
             "trv_offset_history": self.trv_controller.get_offset_history_for_storage(),
+            "trv_offset_by_heat": self.trv_controller.offset_by_heat,
         }
 
         # Add analytics history if enabled
