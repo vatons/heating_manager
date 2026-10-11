@@ -63,6 +63,11 @@ class TRVController:
         # Store per-TRV since different TRVs in same room may have different offsets
         self.offset_ema: dict[str, dict[str, dict[str, float]]] = {}
 
+        # For comparison only (not used for control): the same offset learned
+        # separately while heat was going into the room and while it wasn't.
+        # zone_id -> room_id -> trv_id -> {"heated"|"unheated": {"offset", "samples"}}
+        self.offset_by_heat: dict[str, dict[str, dict[str, dict[str, dict]]]] = {}
+
         # Default offset used before any EMA history is available.
         # 0.0 rather than a positive value: assuming no offset is safer than
         # assuming a fixed 2°C bias that may not apply to the actual TRV hardware.
@@ -78,6 +83,7 @@ class TRVController:
         trv_internal_temp: float | None,
         needs_heating: bool,
         learn_offset: bool = True,
+        radiator_heated: bool | None = None,
     ) -> float:
         """Calculate optimal TRV setpoint using dynamic sensor offset.
 
@@ -92,6 +98,9 @@ class TRVController:
             learn_offset: Update the learned offset from this reading. False when
                 room_temp is a fallback (zone average, TRV, stale value) rather
                 than the room's own sensors.
+            radiator_heated: Whether heat was going into the room since the last
+                update (None if not known yet). Only used to learn the heated and
+                unheated comparison offsets.
 
         Returns:
             Optimal TRV setpoint temperature (°C)
@@ -118,6 +127,8 @@ class TRVController:
         # Update offset EMA for learning
         if learn_offset:
             self._update_offset_ema(zone_id, room_id, trv_id, current_offset)
+            if radiator_heated is not None:
+                self._update_offset_by_heat(zone_id, room_id, trv_id, current_offset, radiator_heated)
 
         # Get learned EMA offset for this TRV
         ema_offset = self._get_ema_offset(zone_id, room_id, trv_id)
@@ -213,6 +224,22 @@ class TRVController:
                 zone_id, room_id, trv_id, old_ema, new_ema, offset, self.ema_alpha
             )
 
+    def _update_offset_by_heat(
+        self, zone_id: str, room_id: str, trv_id: str, offset: float, heated: bool
+    ) -> None:
+        """Learn the offset for heated or unheated periods (same EMA as the main offset)."""
+        states = self.offset_by_heat.setdefault(zone_id, {}).setdefault(room_id, {}).setdefault(trv_id, {})
+        entry = states.get("heated" if heated else "unheated")
+        if entry is None:
+            states["heated" if heated else "unheated"] = {"offset": offset, "samples": 1}
+        else:
+            entry["offset"] = self.ema_alpha * offset + (1 - self.ema_alpha) * entry["offset"]
+            entry["samples"] += 1
+
+    def get_offset_by_heat(self, zone_id: str, room_id: str, trv_id: str) -> dict[str, dict]:
+        """The heated and unheated comparison offsets of a TRV ({} until learned)."""
+        return self.offset_by_heat.get(zone_id, {}).get(room_id, {}).get(trv_id, {})
+
     def _get_ema_offset(
         self, zone_id: str, room_id: str, trv_id: str
     ) -> float:
@@ -306,6 +333,7 @@ class TRVController:
         room_temp: float | None,
         needs_heating: bool,
         learn_offset: bool = True,
+        radiator_heated: bool | None = None,
     ) -> None:
         """Set TRV temperature with intelligent setpoint calculation.
 
@@ -326,6 +354,7 @@ class TRVController:
             zone_id, room_id, trv_id,
             room_temp, target_temp, trv_internal_temp, needs_heating,
             learn_offset=learn_offset,
+            radiator_heated=radiator_heated,
         )
 
         # Fit the setpoint to what this TRV accepts (in its unit). Home Assistant

@@ -18,6 +18,8 @@ CONF_FROST_PROTECTION_TEMP = "frost_protection_temp"
 CONF_AWAY_MODE = "away_mode"
 CONF_HEATING_DEMAND_MODE = "heating_demand_mode"
 CONF_MONITORING_ONLY = "monitoring_only"
+# Optional per zone: an entity that's on while the boiler/heat source heats this zone
+CONF_HEAT_SOURCE = "heat_source"
 CONF_BOOST_DURATION = "boost_duration"
 CONF_HEATING_DEADBAND = "heating_deadband"
 CONF_TRV_OVERSHOOT_ENABLED = "trv_overshoot_enabled"

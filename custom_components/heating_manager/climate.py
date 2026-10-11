@@ -181,6 +181,10 @@ def _global_device_info() -> DeviceInfo:
     )
 
 
+def _round(value: float | None, digits: int = 2) -> float | None:
+    return None if value is None else round(value, digits)
+
+
 def _boost_temperature(hass: HomeAssistant, temperature: float | None) -> float | None:
     """A set_boost temperature (in the system unit) in °C, checked against the boost range."""
     if temperature is None:
@@ -356,6 +360,8 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
 
             # Heating status
             "needs_heating": room_data.get("needs_heating", False),
+            # Wants heat and the zone's heat source is on (what the heating rate learns from)
+            "heated": room_data.get("heated", False),
             "away_mode": self.coordinator.away_mode,
 
             # Boost information (grouped)
@@ -384,6 +390,11 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
                     "current_offset": round(data["current_offset"], 1) if data["current_offset"] is not None else None,
                     "learned_offset": round(data["average_offset"], 1) if data["average_offset"] is not None else None,
                     "setpoint": round(data["trv_setpoint"], 1) if data["trv_setpoint"] is not None else None,
+                    # For comparison (not used for control): offset while heated / not heated
+                    "learned_offset_heated": _round(data.get("offset_heated")),
+                    "learned_offset_unheated": _round(data.get("offset_unheated")),
+                    "samples_heated": data.get("samples_heated", 0),
+                    "samples_unheated": data.get("samples_unheated", 0),
                 }
                 trv_list.append(trv_entry)
 
@@ -678,6 +689,11 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
             "heating_demand": zone_data.get("heating_demand", False),
             "heating_demand_requested": zone_data.get("heating_demand_requested", False),
             "demand_hold": zone_data.get("demand_hold"),
+            # Whether the heat source is heating: from the zone's heat source entity if
+            # set and known ("heat_source"), else from its own call for heat ("zone_demand")
+            "heat_source": zone_data.get("heat_source"),
+            "heat_flowing": zone_data.get("heat_flowing", False),
+            "heat_flowing_basis": zone_data.get("heat_flowing_basis"),
             "heating_demand_mode": zone_data.get("heating_demand_mode", "any_room"),
             "monitoring_only": zone_data.get("monitoring_only", False),
             "away_mode": self.coordinator.away_mode,
