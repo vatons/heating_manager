@@ -45,6 +45,10 @@ from .const import (
     CONF_MIN_BOILER_ON_TIME,
     CONF_OUTDOOR_TEMPERATURE,
     CONF_MINIMUM_TEMP,
+    CONF_SCHEDULE,
+    CONF_WEEKDAY,
+    CONF_WEEKEND,
+    DEFAULT_MINIMUM_TEMP,
     CONF_TRV_COOLDOWN_OFFSET,
     CONF_TRV_OFFSET_EMA_ALPHA,
     CONF_TRV_OVERSHOOT_ENABLED,
@@ -56,12 +60,16 @@ from .const import (
 )
 from .climate import async_link_room_devices
 from .coordinator import HeatingManagerCoordinator
+from .schedule_manager import is_legacy_schedule
 from .entry_data import (
     CONF_ROOM_ID,
     CONF_ZONE_ID,
     SUBENTRY_ROOM,
+    SETTINGS_BY_KEY,
     SUBENTRY_ZONE,
+    coerce_setting,
     entry_to_runtime,
+    schedule_changes,
     legacy_unique_id_map,
     stored_room,
     yaml_to_options,
@@ -187,23 +195,54 @@ async def async_migrate_entry(hass: HomeAssistant, entry: HeatingManagerConfigEn
     """Migrate old config entries.
 
     Version 1 (2.x) kept zones and rooms in the entry's options. Version 2
-    (3.0/3.1) made each zone and each room a subentry. Version 3 (3.2+) keeps
-    each zone's rooms inside the zone's subentry.
+    (3.0/3.1) made each zone and each room a subentry. Version 3 (3.2-3.6) keeps
+    each zone's rooms inside the zone's subentry. Version 4 (3.7+) stores
+    schedules as temperature changes instead of periods with an end.
     """
-    if entry.version > 3:
+    if entry.version > 4:
         return False
+    outside_temp = _outside_temperature_setting(entry)
     if entry.version == 1:
         zones = dict(entry.options.get("zones") or {})
-        for data in zones_to_subentries(zones):
+        for data in zones_to_subentries(zones, outside_temp=outside_temp):
             hass.config_entries.async_add_subentry(entry, ConfigSubentry(**data))
         hass.config_entries.async_update_entry(
-            entry, options={"settings": dict(entry.options.get("settings") or {})}, version=3
+            entry, options={"settings": dict(entry.options.get("settings") or {})}, version=4
         )
         _LOGGER.info("Migrated Heating Manager: %d zone(s) and their rooms are now on the integration page", len(zones))
     if entry.version == 2:
         _async_move_rooms_into_zones(hass, entry)
         hass.config_entries.async_update_entry(entry, version=3)
+    if entry.version == 3:
+        _async_convert_schedules(hass, entry, outside_temp)
+        hass.config_entries.async_update_entry(entry, version=4)
     return True
+
+
+def _outside_temperature_setting(entry: HeatingManagerConfigEntry) -> float:
+    """The temperature outside schedule, as set (for converting pre-3.7 schedules)."""
+    settings = (entry.options or {}).get("settings") or {}
+    return coerce_setting(SETTINGS_BY_KEY[CONF_MINIMUM_TEMP], settings.get(CONF_MINIMUM_TEMP, DEFAULT_MINIMUM_TEMP))
+
+
+@callback
+def _async_convert_schedules(hass: HomeAssistant, entry: HeatingManagerConfigEntry, outside_temp: float) -> None:
+    """3.2-3.6 -> 3.7: each zone's periods (start, end) become temperature changes.
+
+    The temperature at every time of the week stays the same; times that were
+    outside every period become changes to the temperature outside schedule.
+    """
+    for sub in list(entry.subentries.values()):
+        schedule = sub.data.get(CONF_SCHEDULE)
+        if sub.subentry_type != SUBENTRY_ZONE or not is_legacy_schedule(schedule):
+            continue
+        same = bool(sub.data.get("weekend_same_as_weekday"))
+        if same:
+            # "Same as weekdays": the weekend ran the weekday periods, whatever was stored for it
+            schedule = {**schedule, CONF_WEEKEND: schedule.get(CONF_WEEKDAY) or []}
+        changes = schedule_changes(schedule, outside_temp)
+        data = {**sub.data, CONF_SCHEDULE: changes, "weekend_same_as_weekday": same}
+        hass.config_entries.async_update_subentry(entry, sub, data=data)
 
 
 @callback

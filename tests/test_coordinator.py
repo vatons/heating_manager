@@ -306,8 +306,9 @@ async def test_schedule_info(hass, add_trvs, make_coordinator, _frozen):
     _frozen.move_to(local_dt(hour=17))
     await refresh(coordinator)
     info = coordinator.data["zone_1"]["schedule_info"]
-    assert info["current_period"] is None
-    assert info["next_period"]["tomorrow"] is True
+    # After the last period: the temperature outside schedule, until tomorrow's 06:00
+    assert info["current_period"] == {"start": "16:00", "end": "06:00", "temperature": 10.0}
+    assert info["next_period"] == {"start": "06:00", "temperature": 19.5, "tomorrow": True}
 
 
 # ---------------------------------------------------------------------------

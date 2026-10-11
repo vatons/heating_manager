@@ -37,7 +37,7 @@
               "frost_protection_temp": "Away / frost protection temperature"
             },
             "data_description": {
-              "minimum_temp": "Target used when no schedule period is active.",
+              "minimum_temp": "Target for a day with no schedule changes, and for zones without a schedule. New zones also use it for their default 22:00 change.",
               "frost_protection_temp": "Target for every room while away mode is on."
             }
           },
@@ -179,17 +179,17 @@
           "sections": {
             "weekday": {
               "name": "Weekday schedule",
-              "description": "Monday to Friday. Outside these periods the zone uses the 'temperature outside schedule' setting. A period ending at or before its start runs past midnight; use 00:00 as the end for 'until midnight'.",
+              "description": "Monday to Friday. Each change sets the temperature from its time until the next change. The last one carries on overnight until the next day's first, including from Friday into Saturday's weekend schedule. To drop the temperature overnight, add a change with the lower temperature (e.g. 22:00 → 16 °C).",
               "data": {
-                "periods": "Periods"
+                "periods": "Temperature changes"
               }
             },
             "weekend": {
               "name": "Weekend schedule",
-              "description": "Saturday and Sunday.",
+              "description": "Saturday and Sunday. Sunday's last change carries on until Monday's first. With no changes, the weekend uses the 'temperature outside schedule' setting all day.",
               "data": {
                 "same_as_weekdays": "Same as weekdays",
-                "periods": "Periods"
+                "periods": "Temperature changes"
               },
               "data_description": {
                 "periods": "Used when 'Same as weekdays' is off."
@@ -226,17 +226,17 @@
           "sections": {
             "weekday": {
               "name": "Weekday schedule",
-              "description": "Monday to Friday. Outside these periods the zone uses the 'temperature outside schedule' setting. A period ending at or before its start runs past midnight; use 00:00 as the end for 'until midnight'.",
+              "description": "Monday to Friday. Each change sets the temperature from its time until the next change. The last one carries on overnight until the next day's first, including from Friday into Saturday's weekend schedule. To drop the temperature overnight, add a change with the lower temperature (e.g. 22:00 → 16 °C).",
               "data": {
-                "periods": "Periods"
+                "periods": "Temperature changes"
               }
             },
             "weekend": {
               "name": "Weekend schedule",
-              "description": "Saturday and Sunday.",
+              "description": "Saturday and Sunday. Sunday's last change carries on until Monday's first. With no changes, the weekend uses the 'temperature outside schedule' setting all day.",
               "data": {
                 "same_as_weekdays": "Same as weekdays",
-                "periods": "Periods"
+                "periods": "Temperature changes"
               },
               "data_description": {
                 "periods": "Used when 'Same as weekdays' is off."
@@ -261,11 +261,11 @@
         "name_required": "Please enter a name.",
         "name_in_use": "Another zone already has this name.",
         "invalid_time": "Enter valid start and end times for every period.",
-        "overlap": "Periods on the same day can't overlap ({overlap}).",
         "room_name_required": "Every room needs a name.",
         "room_name_in_use": "Two rooms are called {room}. Room names in a zone must be different.",
         "room_empty": "{room} has no TRVs or temperature sensors. Add at least one.",
-        "trv_in_use": "Already used by another room: {trv_conflict}. A TRV can only belong to one room."
+        "trv_in_use": "Already used by another room: {trv_conflict}. A TRV can only belong to one room.",
+        "duplicate_time": "Two changes are at the same time ({duplicate}). Give each change its own time."
       },
       "abort": {
         "reconfigure_successful": "Zone updated."
@@ -295,8 +295,7 @@
     },
     "schedule_period": {
       "fields": {
-        "start": "Start",
-        "end": "End",
+        "start": "From",
         "temperature": "Temperature"
       }
     },
