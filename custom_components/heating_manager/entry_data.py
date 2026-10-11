@@ -89,7 +89,7 @@ from .const import (
     HEATING_DEMAND_MODE_ANY_ROOM,
     HEATING_DEMAND_MODE_ZONE_AVERAGE,
 )
-from .schedule_manager import format_time, parse_time
+from .schedule_manager import convert_legacy_schedule, format_time, is_legacy_schedule, parse_time
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -141,7 +141,42 @@ SETTINGS: tuple[SettingSpec, ...] = (
 )
 SETTINGS_BY_KEY = {spec.key: spec for spec in SETTINGS}
 
-DEFAULT_SCHEDULE_PERIOD = {CONF_START: "06:30", CONF_END: "22:00", CONF_TEMPERATURE: 19.0}
+def default_schedule(outside_temp: float = DEFAULT_MINIMUM_TEMP) -> list[dict]:
+    """A new zone's day: 19 °C from 06:30, back to the temperature outside schedule at 22:00."""
+    return [
+        {CONF_START: "06:30", CONF_TEMPERATURE: 19.0},
+        {CONF_START: "22:00", CONF_TEMPERATURE: float(outside_temp)},
+    ]
+
+
+def schedule_changes(schedule: Any, outside_temp: float) -> dict[str, list[dict]]:
+    """A schedule as temperature changes ({start, temperature}, sorted, one per time).
+
+    Pre-3.7 periods (with an end) are converted, keeping exactly the same
+    temperature at every time of the week.
+    """
+    if not isinstance(schedule, dict):
+        return {day: [] for day in DAY_TYPES}
+    if is_legacy_schedule(schedule):
+        return convert_legacy_schedule(schedule, outside_temp)
+    result: dict[str, list[dict]] = {}
+    for day in DAY_TYPES:
+        changes: dict[int, float] = {}
+        for entry in schedule.get(day) or []:
+            if not isinstance(entry, dict):
+                continue
+            start = parse_time(entry.get(CONF_START))
+            try:
+                temperature = float(entry.get(CONF_TEMPERATURE))
+            except (TypeError, ValueError):
+                continue
+            if start is not None:
+                changes.setdefault(start % (24 * 60), temperature)
+        result[day] = [
+            {CONF_START: format_time(minute), CONF_TEMPERATURE: temperature}
+            for minute, temperature in sorted(changes.items())
+        ]
+    return result
 
 
 def default_settings() -> dict[str, Any]:
@@ -189,7 +224,7 @@ def unique_id_for(name: str, existing: set[str] | dict, fallback: str) -> str:
 def new_zone(name: str) -> dict[str, Any]:
     return {
         "name": name,
-        CONF_SCHEDULE: {day: [dict(DEFAULT_SCHEDULE_PERIOD)] for day in DAY_TYPES},
+        CONF_SCHEDULE: {day: default_schedule() for day in DAY_TYPES},
         CONF_ROOMS: {},
     }
 
@@ -374,11 +409,16 @@ def stored_room(room_id: str, room: dict, **extra) -> dict[str, Any]:
     return data
 
 
-def zone_subentry(zone_id: str, zone: dict, rooms: list[dict] | None = None) -> dict[str, Any]:
-    """ConfigSubentryData for a zone (from the options/YAML zone structure)."""
-    schedule = zone.get(CONF_SCHEDULE) or {}
-    weekday = list(schedule.get(CONF_WEEKDAY) or [])
-    weekend = list(schedule.get(CONF_WEEKEND) or [])
+def zone_subentry(
+    zone_id: str, zone: dict, rooms: list[dict] | None = None, outside_temp: float = DEFAULT_MINIMUM_TEMP
+) -> dict[str, Any]:
+    """ConfigSubentryData for a zone (from the options/YAML zone structure).
+
+    outside_temp: the temperature outside schedule, for converting pre-3.7 periods.
+    """
+    schedule = schedule_changes(zone.get(CONF_SCHEDULE) or {}, outside_temp)
+    weekday = schedule[CONF_WEEKDAY]
+    weekend = schedule[CONF_WEEKEND]
     data: dict[str, Any] = {
         CONF_ZONE_ID: zone_id,
         "name": zone.get("name", zone_id),
@@ -395,7 +435,9 @@ def zone_subentry(zone_id: str, zone: dict, rooms: list[dict] | None = None) -> 
     return {"subentry_type": SUBENTRY_ZONE, "title": zone_title(data), "unique_id": zone_id, "data": data}
 
 
-def zones_to_subentries(zones: dict, taken_room_ids: set[str] | None = None) -> list[dict[str, Any]]:
+def zones_to_subentries(
+    zones: dict, taken_room_ids: set[str] | None = None, outside_temp: float = DEFAULT_MINIMUM_TEMP
+) -> list[dict[str, Any]]:
     """Convert the options/YAML zones structure to zone subentry data.
 
     Room ids must be unique across zones; a clash (e.g. "bathroom" in two
@@ -421,7 +463,7 @@ def zones_to_subentries(zones: dict, taken_room_ids: set[str] | None = None) -> 
                 previous_room_id=room_id if new_id != room_id else None,
                 previous_zone_id=zone_id,
             ))
-        result.append(zone_subentry(zone_id, zone, rooms))
+        result.append(zone_subentry(zone_id, zone, rooms, outside_temp))
     return result
 
 
@@ -442,7 +484,10 @@ def entry_to_runtime(entry: Any) -> tuple[dict, dict]:
         if sub.subentry_type != SUBENTRY_ZONE:
             continue
         data = copy.deepcopy(dict(sub.data))
-        schedule = dict(data.get(CONF_SCHEDULE) or {})
+        stored = dict(data.get(CONF_SCHEDULE) or {})
+        if data.get(CONF_WEEKEND_SAME):
+            stored[CONF_WEEKEND] = stored.get(CONF_WEEKDAY) or []
+        schedule = schedule_changes(stored, settings[CONF_MINIMUM_TEMP])
         if data.get(CONF_WEEKEND_SAME):
             schedule[CONF_WEEKEND] = copy.deepcopy(schedule.get(CONF_WEEKDAY, []))
         zone = {
@@ -529,9 +574,15 @@ def match_room_ids(new_rooms: list[dict], old_rooms: list[dict], taken: set[str]
 # ---------------------------------------------------------------------------
 
 def _normalise_schedule(zone_name: str, schedule: Any) -> dict[str, list[dict]]:
+    """A YAML schedule, cleaned up: pre-3.7 periods (start, end) or changes (start only).
+
+    Periods are kept as periods here (the import screen reports their overlaps);
+    they're converted to changes when the zone is created.
+    """
     result: dict[str, list[dict]] = {day: [] for day in DAY_TYPES}
     if not isinstance(schedule, dict):
         return result
+    legacy = is_legacy_schedule(schedule)
     for day in DAY_TYPES:
         for period in schedule.get(day) or []:
             if not isinstance(period, dict):
@@ -541,15 +592,14 @@ def _normalise_schedule(zone_name: str, schedule: Any) -> dict[str, list[dict]]:
                 temperature = float(period.get(CONF_TEMPERATURE))
             except (TypeError, ValueError):
                 temperature = None
-            if start is None or end is None or temperature is None:
-                _LOGGER.warning("Not importing invalid schedule period in %s: %s", zone_name, period)
+            if start is None or temperature is None or (legacy and end is None):
+                _LOGGER.warning("Not importing invalid schedule entry in %s: %s", zone_name, period)
                 continue
-            # "24:00" becomes "00:00": an end of midnight (00:00-24:00 is all day either way)
-            result[day].append({
-                CONF_START: format_time(start % (24 * 60)),
-                CONF_END: format_time(end % (24 * 60)),
-                CONF_TEMPERATURE: temperature,
-            })
+            entry = {CONF_START: format_time(start % (24 * 60)), CONF_TEMPERATURE: temperature}
+            if legacy:
+                # "24:00" becomes "00:00": an end of midnight (00:00-24:00 is all day either way)
+                entry[CONF_END] = format_time(end % (24 * 60))
+            result[day].append(entry)
         result[day] = sort_periods(result[day])
     return result
 

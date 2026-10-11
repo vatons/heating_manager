@@ -27,7 +27,7 @@ A comprehensive Home Assistant custom component for managing multi-zone heating 
 - **Flexible Climate Entities**:
   - Room, Zone, and Global climate entities
   - Structured attributes with grouped data (boost, temperature, config, TRV control)
-  - Full schedule visibility in zone attributes (current and next periods)
+  - Full schedule visibility in zone attributes (current temperature and the next change)
 - **Heating Analytics**:
   - Track heating and cooling rates per room
   - Estimate time to reach target temperature (ETA)
@@ -65,7 +65,7 @@ Everything is set up in the Home Assistant UI; no YAML is needed. Requires Home 
      - **Name**
      - **Rooms**: add, edit, reorder or delete rooms. Each room has a name, its TRVs, its temperature sensors and an optional temperature offset. A TRV can belong to one room only.
      - **Heating demand mode** and **Monitoring only**
-     - **Weekday schedule** and **Weekend schedule**: add, edit, reorder or delete periods (start, end, temperature); turn on **Same as weekdays** to use one schedule all week. Periods on the same day can't overlap: the form names the two that clash.
+     - **Weekday schedule** and **Weekend schedule**: a list of temperature changes, each a time and a temperature that lasts until the next change (see [Schedules](#schedules)). Turn on **Same as weekdays** to use one schedule all week.
      - **Advanced**: the zone's **heat source** (optional, see [Heat source](#heat-source)), and pairs of temperature sensors with separate "last seen" entities.
    - **Configure** has **Settings** (one form: temperatures, heating demand, boiler protection, sensors and boost, with TRV control, analytics and update interval in collapsed sections; the defaults suit most homes) and **Import from YAML file**.
 
@@ -77,13 +77,13 @@ Each zone and each room appears as a device; rooms are linked to their zone. A r
 
 If you used an earlier version configured with `heating_manager:` in `configuration.yaml`, just upgrade and restart. Your `heating_manager.yaml` is imported into the UI automatically, keeping your zones, rooms, schedules and settings, as well as your entity IDs, history, boosts, overrides and learned TRV offsets.
 
-If the automatic import didn't happen (for example, you removed the YAML before upgrading, or the integration was set up with no zones), use **Configure → Import from YAML file** instead. Enter the file's path relative to your config folder (e.g. `heating_manager.yaml`) and choose whether to also import settings. You'll see the zones, rooms and settings found before anything changes. Zones in the file are added, or replace a zone with the same ID (its rooms are replaced too; rooms with the same ID or name keep their entities); other zones are kept. Overlapping schedule periods in the file are listed as warnings; they import as they are, and the zone's form asks you to fix them the next time you edit it. This works any time, not just when upgrading.
+If the automatic import didn't happen (for example, you removed the YAML before upgrading, or the integration was set up with no zones), use **Configure → Import from YAML file** instead. Enter the file's path relative to your config folder (e.g. `heating_manager.yaml`) and choose whether to also import settings. You'll see the zones, rooms and settings found before anything changes. Zones in the file are added, or replace a zone with the same ID (its rooms are replaced too; rooms with the same ID or name keep their entities); other zones are kept. Schedules in the file can use periods with an end (as before 3.7) or changes without one; periods are converted as described under [Schedules](#schedules), and any that overlap are listed as warnings (where they do, the earlier one is used, as before). This works any time, not just when upgrading.
 
 After the automatic import, Home Assistant shows a repair notice: remove the `heating_manager:` entry from `configuration.yaml`, delete `heating_manager.yaml` and restart. From then on, make changes on the integration page; edits to the YAML are ignored.
 
 ### Upgrading
 
-Version 3.0 moved zones and rooms out of the Configure menu and onto the integration page; 3.2 moves each zone's rooms into the zone's form. Your existing setup (2.x, 3.0 or 3.1) is converted automatically on the first restart, keeping entity IDs, history, learned TRV offsets and any device names or areas you set. Room IDs are unique across zones: if two zones had a room with the same ID (e.g. two `bathroom`s), the second becomes `<zone>_bathroom`; its entity ID doesn't change.
+Version 3.0 moved zones and rooms out of the Configure menu and onto the integration page; 3.2 moves each zone's rooms into the zone's form; 3.7 turns schedule periods into temperature changes (see [Schedules](#schedules)). Your existing setup (2.x or 3.x) is converted automatically on the first restart, keeping entity IDs, history, learned TRV offsets and any device names or areas you set. Room IDs are unique across zones: if two zones had a room with the same ID (e.g. two `bathroom`s), the second becomes `<zone>_bathroom`; its entity ID doesn't change.
 
 ### Entities
 
@@ -270,8 +270,8 @@ The zone climate entity attributes include:
 - `manual_override.temperature` - The manual override temperature (null if not active)
 - `away_mode` - Current away mode status
 - `schedule.current_temperature` - Currently scheduled target temperature
-- `schedule.current_period` - Current schedule period (`start`, `end`, `temperature`)
-- `schedule.next_period` - Next schedule period
+- `schedule.current_period` - The temperature now: since when (`start`, with `yesterday: true` if it started the day before), until when (`end`, the next change) and `temperature`
+- `schedule.next_period` - The next change (`start`, `temperature`, and `tomorrow: true` if it's the next day)
 
 #### Boiler protection (minimum on/off times)
 
@@ -759,14 +759,25 @@ A room with TRVs but **no sensors configured** always uses its TRVs' own tempera
 
 Heating Manager works with Home Assistant set to °F. Sensor readings and TRV temperatures, limits and step sizes are converted automatically, and the room, zone and global climate entities display °F. Schedules, offsets and the temperatures in the forms and **Configure** are entered in °C. The `set_boost` service's `temperature` is in your unit system.
 
-### Schedule Time Format
+### Schedules
 
-- Periods are edited with time pickers in the zone's form
-- `end` is exclusive; use 00:00 to run until midnight
-- A period with the same start and end (e.g. "00:00" to "00:00") covers the whole day
-- A period ending before it starts (e.g. "22:00" to "06:00") spans midnight
-- Periods on the same day can't overlap
-- When no schedule is active, uses `minimum_temp` setting
+Each zone has a weekday schedule (Monday to Friday) and a weekend schedule (Saturday and Sunday), or one for every day with **Same as weekdays**. A schedule is a list of temperature changes: a time, and the temperature from then until the next change.
+
+```
+06:00  19.5 °C
+08:00  18.5 °C
+16:00  19.5 °C
+21:00  17.5 °C   ← lasts overnight, until 06:00 the next morning
+```
+
+- The last change of a day carries on past midnight until the first change of the next day, including from Friday into Saturday (weekday to weekend schedule) and from Sunday into Monday. With the example above and a weekend schedule starting at 08:30, Saturday is 17.5 °C until 08:30.
+- To drop the temperature overnight, add a change with the lower temperature (e.g. 22:00 → 16 °C). A change at 00:00 starts the day at a set temperature whatever the day before ended on.
+- The order in the list doesn't matter; two changes can't share a time.
+- A schedule with no changes uses **Temperature outside schedule** (Configure → Settings) all day.
+- New zones start with 19 °C from 06:30 and the temperature outside schedule from 22:00.
+- Times are picked with the time picker; in YAML, write them as `"07:30"` (quoted or not).
+
+**Upgrading from periods (3.6 and earlier).** Schedules used to be periods with a start and an end, and any time outside every period used the temperature outside schedule. On upgrade, and when importing such YAML, each period becomes a change at its start, and each gap after a period becomes a change to the temperature outside schedule (its value at the time). The temperature at every minute of the week stays exactly the same, including overnight between weekdays and weekends; where a day needs it for that, a change at 00:00 is added. If you later change the temperature outside schedule, update those converted changes in the zone's form too.
 
 ## Development
 

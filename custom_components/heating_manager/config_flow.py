@@ -28,7 +28,8 @@ from homeassistant.data_entry_flow import section
 from homeassistant.helpers import selector
 
 from .const import (
-    CONF_END,
+    CONF_MINIMUM_TEMP,
+    DEFAULT_MINIMUM_TEMP,
     CONF_HEAT_SOURCE,
     CONF_HEATING_DEMAND_MODE,
     CONF_MONITORING_ONLY,
@@ -47,7 +48,7 @@ from .entry_data import (
     CONF_ROOM_ID,
     CONF_WEEKEND_SAME,
     CONF_ZONE_ID,
-    DEFAULT_SCHEDULE_PERIOD,
+    default_schedule,
     HEATING_DEMAND_MODES,
     OPT_SETTINGS,
     OPT_ZONES,
@@ -59,11 +60,9 @@ from .entry_data import (
     dedupe_trvs,
     default_settings,
     entry_to_runtime,
-    first_overlap,
     match_room_ids,
     room_label_for,
     schedule_overlaps,
-    sort_periods,
     unique_id_for,
     zone_title,
     yaml_to_options,
@@ -131,7 +130,8 @@ def _setting_selector(spec: SettingSpec) -> selector.Selector:
     return selector.NumberSelector(config)
 
 
-# A day's schedule: an editable list of periods, each edited in its own dialog
+# A day's schedule: an editable list of temperature changes (from a time, until the next),
+# each edited in its own dialog
 PERIODS_SELECTOR = selector.ObjectSelector(
     selector.ObjectSelectorConfig(
         multiple=True,
@@ -140,7 +140,6 @@ PERIODS_SELECTOR = selector.ObjectSelector(
         translation_key="schedule_period",
         fields={
             CONF_START: {"required": True, "selector": {"time": {}}},
-            CONF_END: {"required": True, "selector": {"time": {}}},
             CONF_TEMPERATURE: {
                 "required": True,
                 "selector": {"number": {
@@ -190,31 +189,34 @@ LAST_SEEN_SELECTOR = selector.ObjectSelector(
 )
 
 
-def _periods_for_form(periods: list[dict]) -> list[dict]:
-    """Stored "HH:MM" periods as the time selector's "HH:MM:SS" values."""
-    return [
-        {CONF_START: f"{p[CONF_START]}:00", CONF_END: f"{p[CONF_END]}:00", CONF_TEMPERATURE: p[CONF_TEMPERATURE]}
-        for p in periods
-    ]
+def _periods_for_form(changes: list[dict]) -> list[dict]:
+    """Stored "HH:MM" changes as the time selector's "HH:MM:SS" values."""
+    return [{CONF_START: f"{c[CONF_START]}:00", CONF_TEMPERATURE: c[CONF_TEMPERATURE]} for c in changes]
 
 
-def _periods_from_form(items: list[dict] | None) -> list[dict] | None:
-    """Validate and normalise a list of periods; None if a time is invalid."""
-    periods = []
+def _periods_from_form(items: list[dict] | None) -> tuple[list[dict] | None, str | None]:
+    """A day's changes from the form, sorted by time.
+
+    Returns (changes, None), (None, "HH:MM") if two changes share a time, or
+    (None, None) if a time or temperature is invalid.
+    """
+    changes: dict[int, float] = {}
     for item in items or []:
-        start, end = parse_time(item.get(CONF_START)), parse_time(item.get(CONF_END))
+        start = parse_time(item.get(CONF_START))
         try:
             temperature = float(item.get(CONF_TEMPERATURE))
         except (TypeError, ValueError):
-            return None
-        if start is None or end is None:
-            return None
-        periods.append({
-            CONF_START: format_time(start % 1440),
-            CONF_END: format_time(end % 1440),
-            CONF_TEMPERATURE: temperature,
-        })
-    return sort_periods(periods)
+            return None, None
+        if start is None:
+            return None, None
+        start %= 1440
+        if start in changes:
+            return None, format_time(start)
+        changes[start] = temperature
+    return [
+        {CONF_START: format_time(minute), CONF_TEMPERATURE: temperature}
+        for minute, temperature in sorted(changes.items())
+    ], None
 
 
 def _subentries(entry: ConfigEntry, subentry_type: str) -> list[ConfigSubentry]:
@@ -228,7 +230,7 @@ def _subentries(entry: ConfigEntry, subentry_type: str) -> list[ConfigSubentry]:
 class HeatingManagerConfigFlow(ConfigFlow, domain=DOMAIN):
     """Add Integration wizard and YAML import."""
 
-    VERSION = 3
+    VERSION = 4
 
     @staticmethod
     @callback
@@ -253,7 +255,7 @@ class HeatingManagerConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 zone_id = unique_id_for(name, set(), "zone_1")
                 zone = {"name": name, CONF_SCHEDULE: {
-                    CONF_WEEKDAY: [dict(DEFAULT_SCHEDULE_PERIOD)], CONF_WEEKEND: [dict(DEFAULT_SCHEDULE_PERIOD)],
+                    CONF_WEEKDAY: default_schedule(), CONF_WEEKEND: default_schedule(),
                 }}
                 return self.async_create_entry(
                     title=TITLE,
@@ -275,7 +277,10 @@ class HeatingManagerConfigFlow(ConfigFlow, domain=DOMAIN):
             title=TITLE,
             data={},
             options={OPT_SETTINGS: import_data.get(OPT_SETTINGS, {})},
-            subentries=zones_to_subentries(import_data.get(OPT_ZONES, {})),
+            subentries=zones_to_subentries(
+                import_data.get(OPT_ZONES, {}),
+                outside_temp=(import_data.get(OPT_SETTINGS) or {}).get(CONF_MINIMUM_TEMP, DEFAULT_MINIMUM_TEMP),
+            ),
         )
 
 
@@ -324,6 +329,11 @@ def _zone_form_values(data: dict) -> dict:
 
 class ZoneSubentryFlow(ConfigSubentryFlow):
     """Add or reconfigure a zone: its rooms, schedules, demand mode and monitoring."""
+
+    def _outside_temperature(self) -> float:
+        """The temperature outside schedule (Settings), for a new zone's default schedule."""
+        settings = self._get_entry().options.get(OPT_SETTINGS) or {}
+        return coerce_setting(SETTINGS_BY_KEY[CONF_MINIMUM_TEMP], settings.get(CONF_MINIMUM_TEMP, DEFAULT_MINIMUM_TEMP))
 
     def _schema(self, values: dict) -> vol.Schema:
         weekday = values.get(CONF_WEEKDAY) or {}
@@ -375,7 +385,7 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
         entry = self._get_entry()
         other_zones = [sub for sub in _subentries(entry, SUBENTRY_ZONE) if sub.data.get(CONF_ZONE_ID) != zone_id]
         errors: dict[str, str] = {}
-        placeholders = {"overlap": "", "room": "", "trv_conflict": ""}
+        placeholders = {"duplicate": "", "room": "", "trv_conflict": ""}
 
         name = user_input.get(CONF_NAME, "").strip()
         if not name:
@@ -417,17 +427,16 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
         weekday_in = user_input.get(CONF_WEEKDAY) or {}
         weekend_in = user_input.get(CONF_WEEKEND) or {}
         same = bool(weekend_in.get(CONF_SAME, True))
-        weekday = _periods_from_form(weekday_in.get(CONF_PERIODS))
-        weekend = [] if same else _periods_from_form(weekend_in.get(CONF_PERIODS))
+        weekday, weekday_duplicate = _periods_from_form(weekday_in.get(CONF_PERIODS))
+        weekend, weekend_duplicate = ([], None) if same else _periods_from_form(weekend_in.get(CONF_PERIODS))
         if "base" not in errors:
-            if weekday is None or weekend is None:
+            if weekday_duplicate or weekend_duplicate:
+                errors["base"] = "duplicate_time"
+                placeholders["duplicate"] = (
+                    f"Weekdays: {weekday_duplicate}" if weekday_duplicate else f"Weekends: {weekend_duplicate}"
+                )
+            elif weekday is None or weekend is None:
                 errors["base"] = "invalid_time"
-            else:
-                for day, periods in (("Weekdays", weekday), ("Weekends", weekend)):
-                    if overlap := first_overlap(periods):
-                        errors["base"] = "overlap"
-                        placeholders["overlap"] = f"{day}: {overlap}"
-                        break
         if errors:
             return None, errors, placeholders
 
@@ -457,9 +466,9 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
         return data, errors, placeholders
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
-        values = _zone_form_values({CONF_SCHEDULE: {CONF_WEEKDAY: [dict(DEFAULT_SCHEDULE_PERIOD)]}})
+        values = _zone_form_values({CONF_SCHEDULE: {CONF_WEEKDAY: default_schedule(self._outside_temperature())}})
         errors: dict[str, str] = {}
-        placeholders = {"overlap": "", "room": "", "trv_conflict": ""}
+        placeholders = {"duplicate": "", "room": "", "trv_conflict": ""}
         if user_input is not None:
             taken = {sub.data.get(CONF_ZONE_ID) for sub in _subentries(self._get_entry(), SUBENTRY_ZONE)}
             zone_id = unique_id_for(user_input.get(CONF_NAME, "").strip(), taken, "zone")
@@ -480,7 +489,7 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
         zone_id = subentry.data[CONF_ZONE_ID]
         values = _zone_form_values(dict(subentry.data))
         errors: dict[str, str] = {}
-        placeholders = {"overlap": "", "room": "", "trv_conflict": ""}
+        placeholders = {"duplicate": "", "room": "", "trv_conflict": ""}
         if user_input is not None:
             data, errors, placeholders = self._validate(
                 user_input, zone_id, list(subentry.data.get(CONF_ROOMS) or [])
@@ -616,8 +625,9 @@ class HeatingManagerOptionsFlow(OptionsFlow):
             self._pending_import = None
             if not user_input.get(CONF_CONFIRM):
                 return await self.async_step_init()
-            self._apply_import(pending[OPT_ZONES])
             settings = {**self._current_settings(), **pending[OPT_SETTINGS]}
+            # Periods in the file are converted with the temperature outside schedule they'll run with
+            self._apply_import(pending[OPT_ZONES], settings[CONF_MINIMUM_TEMP])
             return self.async_create_entry(data={**entry.options, OPT_SETTINGS: settings})
 
         zone_lines = []
@@ -645,7 +655,7 @@ class HeatingManagerOptionsFlow(OptionsFlow):
         ]
         if overlaps:
             warning_blocks.append(
-                "Schedule periods that overlap (fix them in the zone after importing):\n"
+                "Schedule periods that overlap (where they do, the earlier one is used):\n"
                 + "\n".join(f"- {o}" for o in overlaps)
             )
         warnings = "\n\n".join(warning_blocks)
@@ -660,7 +670,7 @@ class HeatingManagerOptionsFlow(OptionsFlow):
             },
         )
 
-    def _apply_import(self, zones: dict[str, dict]) -> None:
+    def _apply_import(self, zones: dict[str, dict], outside_temp: float) -> None:
         """Add the imported zones; a zone with the same id is replaced, keeping matching rooms' entities."""
         entry = self.config_entry
         config_entries = self.hass.config_entries
@@ -672,10 +682,12 @@ class HeatingManagerOptionsFlow(OptionsFlow):
                 new_zones[zone_id] = zone
                 continue
             rooms = [{**room, CONF_ROOM_ID: room_id} for room_id, room in (zone.get(CONF_ROOMS) or {}).items()]
-            data = zone_subentry(zone_id, zone)["data"]
+            data = zone_subentry(zone_id, zone, outside_temp=outside_temp)["data"]
             data[CONF_ROOMS] = match_room_ids(
                 rooms, list(sub.data.get(CONF_ROOMS) or []), all_room_ids(entry, exclude_zone=zone_id)
             )
             config_entries.async_update_subentry(entry, sub, data=data, title=zone_title(data))
-        for data in zones_to_subentries(new_zones, taken_room_ids=all_room_ids(entry)):
+        for data in zones_to_subentries(
+            new_zones, taken_room_ids=all_room_ids(entry), outside_temp=outside_temp
+        ):
             config_entries.async_add_subentry(entry, ConfigSubentry(**data))

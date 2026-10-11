@@ -115,9 +115,9 @@ async def submit(hass, result, data):
     return result
 
 
-def period(start, end, temperature):
-    """A period as the time selector sends it."""
-    return {"start": f"{start}:00", "end": f"{end}:00", "temperature": temperature}
+def period(start, temperature):
+    """A temperature change as the time selector sends it."""
+    return {"start": f"{start}:00", "temperature": temperature}
 
 
 def room(name, trvs=(), sensors=(), offset=None):
@@ -195,11 +195,13 @@ async def test_user_flow_creates_entry_with_first_zone(hass, env):
     await hass.async_block_till_done()
 
     entry = result["result"]
-    assert entry.version == 3
+    assert entry.version == 4
     assert entry.options == {"settings": default_settings()}
     zone = zones(entry)["upstairs"]
     assert zone.title == "Upstairs · no rooms"
-    assert zone.data["schedule"]["weekday"] == [{"start": "06:30", "end": "22:00", "temperature": 19.0}]
+    assert zone.data["schedule"]["weekday"] == [
+        {"start": "06:30", "temperature": 19.0}, {"start": "22:00", "temperature": 7.0},
+    ]
     assert zone.data["weekend_same_as_weekday"] is True
     assert zone.data["rooms"] == []
     assert hass.states.get("climate.upstairs") is not None
@@ -236,8 +238,8 @@ async def test_add_zone_with_rooms(hass, entry):
     result = await submit(hass, result, zone_input(
         "Upstairs",
         rooms=[room("Study", ["climate.study_trv"], ["sensor.study"], offset=-1.5), room("Landing", [], ["sensor.landing"])],
-        weekday=[("17:00", "22:30", 21), ("06:00", "08:00", 20)],
-        weekend=[("08:00", "23:00", 20.5)], mode="zone_average",
+        weekday=[("17:00", 21), ("06:00", 20), ("08:00", 7), ("22:30", 7)],
+        weekend=[("08:00", 20.5), ("23:00", 7)], mode="zone_average",
         last_seen={"sensor.study": "sensor.study_last_seen", "sensor.unused": "sensor.x"},
     ))
     assert result["type"] is FlowResultType.CREATE_ENTRY
@@ -249,10 +251,12 @@ async def test_add_zone_with_rooms(hass, entry):
         "name": "Upstairs",
         "schedule": {
             "weekday": [                                              # sorted, seconds dropped
-                {"start": "06:00", "end": "08:00", "temperature": 20.0},
-                {"start": "17:00", "end": "22:30", "temperature": 21.0},
+                {"start": "06:00", "temperature": 20.0},
+                {"start": "08:00", "temperature": 7.0},
+                {"start": "17:00", "temperature": 21.0},
+                {"start": "22:30", "temperature": 7.0},
             ],
-            "weekend": [{"start": "08:00", "end": "23:00", "temperature": 20.5}],
+            "weekend": [{"start": "08:00", "temperature": 20.5}, {"start": "23:00", "temperature": 7.0}],
         },
         "weekend_same_as_weekday": False,
         "rooms": [
@@ -266,7 +270,7 @@ async def test_add_zone_with_rooms(hass, entry):
     # Applied straight away; the rooms' entities and devices are in the zone's subentry
     study = hass.states.get("climate.upstairs_study")
     assert study is not None
-    assert study.attributes["temperature"] == 7.0              # 12:00 is outside both periods
+    assert study.attributes["temperature"] == 7.0              # 12:00: the 08:00 change to 7 °C
     assert hass.states.get("climate.upstairs_landing") is not None
     ent_reg, dev_reg = er.async_get(hass), dr.async_get(hass)
     registered = ent_reg.async_get("climate.upstairs_study")
@@ -278,7 +282,7 @@ async def test_add_zone_with_rooms(hass, entry):
 
 
 async def test_weekend_same_as_weekdays(hass, entry):
-    await submit(hass, await start_zone(hass, entry), zone_input("Upstairs", weekday=[("06:00", "08:00", 20)]))
+    await submit(hass, await start_zone(hass, entry), zone_input("Upstairs", weekday=[("06:00", 20), ("08:00", 7)]))
     zone = zones(entry)["upstairs"]
     assert zone.data["weekend_same_as_weekday"] is True
     runtime = entry_to_runtime(entry)[0]["zones"]["upstairs"]
@@ -288,42 +292,41 @@ async def test_weekend_same_as_weekdays(hass, entry):
 @pytest.mark.parametrize(
     ("weekday", "weekend", "message"),
     [
-        ([("06:00", "08:00", 20), ("07:30", "09:00", 19)], None,
-         "Weekdays: 06:00–08:00 and 07:30–09:00"),
-        ([("22:00", "02:00", 18), ("01:00", "05:00", 16)], None,                 # past midnight
-         "Weekdays: 01:00–05:00 and 22:00–02:00"),
-        ([("00:00", "00:00", 18), ("12:00", "13:00", 21)], None,                 # all day
-         "Weekdays: 00:00–00:00 and 12:00–13:00"),
-        ([("06:00", "08:00", 20)], [("09:00", "12:00", 20), ("11:00", "14:00", 19)],
-         "Weekends: 09:00–12:00 and 11:00–14:00"),
+        ([("06:00", 20), ("06:00:30", 19)], None, "Weekdays: 06:00"),      # same minute
+        ([("06:00", 20)], [("09:00", 20), ("09:00", 19)], "Weekends: 09:00"),
     ],
 )
-async def test_overlapping_periods_are_rejected(hass, entry, weekday, weekend, message):
-    result = await start_zone(hass, entry)
-    result = await submit(hass, result, zone_input("Upstairs", weekday=weekday, weekend=weekend, rooms=[room("Study", sensors=["sensor.study"])]))
+async def test_two_changes_at_the_same_time_are_rejected(hass, entry, weekday, weekend, message):
+    def item(start, temperature):
+        return {"start": start if start.count(":") == 2 else f"{start}:00", "temperature": temperature}
+
+    data = zone_input("Upstairs", rooms=[room("Study", sensors=["sensor.study"])])
+    data["weekday"]["periods"] = [item(*p) for p in weekday]
+    if weekend is not None:
+        data["weekend"] = {"same_as_weekdays": False, "periods": [item(*p) for p in weekend]}
+    result = await submit(hass, await start_zone(hass, entry), data)
     assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {"base": "overlap"}
-    assert result["description_placeholders"]["overlap"] == message
+    assert result["errors"] == {"base": "duplicate_time"}
+    assert result["description_placeholders"]["duplicate"] == message
     assert "upstairs" not in zones(entry)
     # What was entered is shown again
     values = shown(result)
     assert values["name"] == "Upstairs"
     assert values["rooms"] == [room("Study", sensors=["sensor.study"])]
-    assert sorted(p["start"] for p in values["weekday"]["periods"]) == sorted(f"{p[0]}:00" for p in weekday)
     assert values["weekend"]["same_as_weekdays"] is (weekend is None)
 
 
-async def test_periods_that_only_touch_are_allowed(hass, entry):
-    result = await start_zone(hass, entry)
-    result = await submit(hass, result, zone_input(
-        "Upstairs", weekday=[("06:00", "08:00", 20), ("08:00", "09:00", 19), ("22:00", "06:00", 16)],
+async def test_changes_in_any_order(hass, entry):
+    result = await submit(hass, await start_zone(hass, entry), zone_input(
+        "Upstairs", weekday=[("22:00", 16), ("06:00", 20), ("08:00", 19)],
     ))
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert [c["start"] for c in zones(entry)["upstairs"].data["schedule"]["weekday"]] == ["06:00", "08:00", "22:00"]
 
 
 async def test_weekend_periods_ignored_when_same_as_weekdays(hass, entry):
-    data = zone_input("Upstairs", weekday=[("06:00", "08:00", 20)])
-    data["weekend"]["periods"] = [period("09:00", "12:00", 20), period("11:00", "14:00", 19)]
+    data = zone_input("Upstairs", weekday=[("06:00", 20), ("08:00", 7)])
+    data["weekend"]["periods"] = [period("09:00", 20), period("09:00", 19)]
     result = await submit(hass, await start_zone(hass, entry), data)
     assert result["type"] is FlowResultType.CREATE_ENTRY
 
@@ -381,24 +384,24 @@ async def test_reconfigure_zone(hass, entry):
     assert values["name"] == "Downstairs"
     assert values["rooms"] == [room("Lounge", ["climate.lounge_trv"], ["sensor.lounge"])]
     assert values["advanced"]["last_seen"] == [{"temperature": "sensor.lounge", "last_seen": "sensor.lounge_last_seen"}]
-    assert values["weekday"]["periods"] == [period("06:30", "22:00", 19.0)]
+    assert values["weekday"]["periods"] == [period("06:30", 19.0), period("22:00", 7.0)]
 
-    values.update(name="Ground floor", monitoring_only=True, weekday={"periods": [period("07:00", "09:00", 20)]})
+    values.update(name="Ground floor", monitoring_only=True, weekday={"periods": [period("07:00", 20), period("09:00", 7)]})
     result = await submit(hass, result, values)
     assert result["type"] is FlowResultType.ABORT and result["reason"] == "reconfigure_successful"
     zone = zones(entry)["downstairs"]                               # id kept on rename
     assert zone.title == "Ground floor · 1 room · monitoring only"
     assert zone.data["monitoring_only"] is True
-    assert zone.data["schedule"]["weekday"] == [{"start": "07:00", "end": "09:00", "temperature": 20.0}]
+    assert zone.data["schedule"]["weekday"] == [{"start": "07:00", "temperature": 20.0}, {"start": "09:00", "temperature": 7.0}]
     assert rooms(entry)["lounge"]["sensors"] == ROOM_OPTIONS["sensors"]     # last seen kept
     # Entity ids are unchanged
     assert hass.states.get("climate.downstairs").attributes["monitoring_only"] is True
     assert hass.states.get("climate.downstairs_lounge") is not None
 
 
-async def test_reconfigure_zone_rejects_overlap(hass, entry):
-    result = await edit_zone(hass, entry, weekday={"periods": [period("06:00", "09:00", 20), period("08:00", "10:00", 18)]})
-    assert result["errors"] == {"base": "overlap"}
+async def test_reconfigure_zone_rejects_duplicate_times(hass, entry):
+    result = await edit_zone(hass, entry, weekday={"periods": [period("06:00", 20), period("06:00", 18)]})
+    assert result["errors"] == {"base": "duplicate_time"}
     assert zones(entry)["downstairs"].data["schedule"]["weekday"][0]["start"] == "06:30"
 
 
@@ -537,7 +540,7 @@ async def test_title_only_change_does_not_reload(hass, entry):
 
 async def test_toggle_monitoring_only(hass, entry, env):
     async def set_monitoring(value):
-        await edit_zone(hass, entry, monitoring_only=value, weekday={"periods": [period("00:00", "00:00", 19)]})
+        await edit_zone(hass, entry, monitoring_only=value, weekday={"periods": [period("00:00", 19)]})
 
     await set_monitoring(False)
     # Cold lounge: normally heats
@@ -668,7 +671,7 @@ async def test_yaml_import_creates_entry_with_zones_and_rooms(hass, env, tmp_pat
     entries = hass.config_entries.async_entries(DOMAIN)
     assert len(entries) == 1
     entry = entries[0]
-    assert entry.version == 3
+    assert entry.version == 4
 
     settings = entry.options["settings"]
     assert settings["minimum_temp"] == 12
@@ -678,11 +681,19 @@ async def test_yaml_import_creates_entry_with_zones_and_rooms(hass, env, tmp_pat
     zone = zones(entry)["downstairs"]
     assert zone.title == "Downstairs · 2 rooms"
     assert zone.data["heating_demand_mode"] == "any_room"
+    # Periods (start, end) become temperature changes; the gaps between them become
+    # changes to the temperature outside schedule from the file (minimum_temp: 12).
+    # Weekend days end at 20 °C but weekdays at 12 °C, so both keep a change at midnight.
     assert zone.data["schedule"]["weekday"] == [                  # sorted, normalised, invalid dropped
-        {"start": "06:30", "end": "08:00", "temperature": 19.5},
-        {"start": "16:00", "end": "21:00", "temperature": 20.0},
+        {"start": "00:00", "temperature": 12.0},
+        {"start": "06:30", "temperature": 19.5},
+        {"start": "08:00", "temperature": 12.0},
+        {"start": "16:00", "temperature": 20.0},
+        {"start": "21:00", "temperature": 12.0},
     ]
-    assert zone.data["schedule"]["weekend"] == [{"start": "07:00", "end": "00:00", "temperature": 20.0}]
+    assert zone.data["schedule"]["weekend"] == [
+        {"start": "00:00", "temperature": 12.0}, {"start": "07:00", "temperature": 20.0},
+    ]
     assert zone.data["weekend_same_as_weekday"] is False
 
     imported = rooms(entry)
@@ -737,11 +748,12 @@ async def test_yaml_with_overlapping_periods_imports_and_warns(hass, env, tmp_pa
     text = LEGACY_YAML.replace("{start: 16:00, end: 21:00", "{start: 07:00, end: 21:00")
     await setup_yaml(hass, tmp_path, text=text)
     entry = hass.config_entries.async_entries(DOMAIN)[0]
-    assert len(zones(entry)["downstairs"].data["schedule"]["weekday"]) == 2
     assert "Downstairs weekdays: 06:30–08:00 and 07:00–21:00" in caplog.text
-    # Editing the zone asks for the overlap to be fixed
-    result = await edit_zone(hass, entry)
-    assert result["errors"] == {"base": "overlap"}
+    # As before 3.7, where periods overlap the earlier one is used
+    assert zones(entry)["downstairs"].data["schedule"]["weekday"] == [
+        {"start": "00:00", "temperature": 12.0}, {"start": "06:30", "temperature": 19.5},
+        {"start": "08:00", "temperature": 20.0}, {"start": "21:00", "temperature": 12.0},
+    ]
 
 
 async def test_yaml_entities_keep_entity_ids_and_state(hass, hass_storage, env, tmp_path):
@@ -796,7 +808,7 @@ async def test_migrate_v1_entry_to_zones_with_rooms(hass, env):
         ent_reg.async_get_or_create("climate", DOMAIN, unique_id, suggested_object_id=object_id, config_entry=entry)
     await setup_entry(hass, entry)
 
-    assert entry.version == 3
+    assert entry.version == 4
     assert entry.options == {"settings": options["settings"]}
     by_id = zones(entry)
     assert set(by_id) == {"downstairs", "upstairs"}
@@ -858,10 +870,14 @@ async def test_migrate_31_room_subentries_into_zones(hass, env):
     )
     await setup_entry(hass, entry)
 
-    assert entry.version == 3
+    assert entry.version == 4
     assert [s.subentry_type for s in entry.subentries.values()] == ["zone"]
     zone = zones(entry)["downstairs"]
     assert zone.title == "Downstairs · 1 room"
+    # Periods became changes; "same as weekdays" kept (the stored weekend list was empty)
+    assert zone.data["schedule"]["weekday"] == [{"start": "06:30", "temperature": 19.0}, {"start": "22:00", "temperature": 7.0}]
+    assert zone.data["schedule"]["weekend"] == zone.data["schedule"]["weekday"]
+    assert zone.data["weekend_same_as_weekday"] is True
     assert rooms(entry) == {"lounge": {
         "room_id": "lounge", "name": "Lounge", "trvs": ["climate.lounge_trv"],
         "sensors": [{"temperature": "sensor.lounge"}], "temperature_offset": -1.0, "previous_zone_id": "downstairs",
@@ -923,7 +939,7 @@ async def test_zone_and_room_ids_that_used_to_collide_get_separate_entities(hass
 
 
 async def test_newer_entry_version_is_refused(hass, env):
-    entry = MockConfigEntry(domain=DOMAIN, data={}, options={}, version=4)
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options={}, version=5)
     entry.add_to_hass(hass)
     assert not await hass.config_entries.async_setup(entry.entry_id)
     assert entry.state is config_entries.ConfigEntryState.MIGRATION_ERROR
@@ -992,7 +1008,7 @@ async def test_import_yaml_into_empty_entry(hass, env, config_file):
 
 
 async def test_import_yaml_replaces_zone_and_keeps_others(hass, entry, config_file):
-    await submit(hass, await start_zone(hass, entry), zone_input("Upstairs", weekday=[("06:00", "08:00", 20)]))
+    await submit(hass, await start_zone(hass, entry), zone_input("Upstairs", weekday=[("06:00", 20), ("08:00", 7)]))
     # The existing lounge was renamed in the UI; its id still matches the file's
     await edit_zone(hass, entry, rooms=[room("Front room", ["climate.lounge_trv"], ["sensor.lounge"])])
     ent_reg = er.async_get(hass)
@@ -1014,7 +1030,9 @@ async def test_import_yaml_replaces_zone_and_keeps_others(hass, entry, config_fi
     assert imported["lounge"]["name"] == "Lounge"
     assert imported["lounge"]["temperature_offset"] == -1.0
     assert ent_reg.async_get_entity_id("climate", DOMAIN, room_unique_id("lounge")) == lounge_entity
-    assert len(zones(entry)["downstairs"].data["schedule"]["weekday"]) == 2
+    assert [c["start"] for c in zones(entry)["downstairs"].data["schedule"]["weekday"]] == [
+        "00:00", "06:30", "08:00", "16:00", "21:00",
+    ]
     assert entry.options["settings"]["minimum_temp"] == 14                # settings untouched
     assert hass.states.get("climate.downstairs_lounge") is not None
     assert hass.states.get("climate.upstairs") is not None
@@ -1203,7 +1221,7 @@ async def test_every_ui_string_is_translated(hass, entry, config_file):
         result = await start_zone(hass, entry, zone_id)
         check_form(sub_strings["zone"]["step"][result["step_id"]], result)
         hass.config_entries.subentries.async_abort(result["flow_id"])
-    for key in ("name_required", "name_in_use", "invalid_time", "overlap",
+    for key in ("name_required", "name_in_use", "invalid_time", "duplicate_time",
                 "room_name_required", "room_name_in_use", "room_empty", "trv_in_use"):
         assert key in sub_strings["zone"]["error"]
     assert "reconfigure_successful" in sub_strings["zone"]["abort"]
@@ -1213,6 +1231,6 @@ async def test_every_ui_string_is_translated(hass, entry, config_file):
     assert "name" in strings["config"]["step"]["user"]["data"]
     for key in ("zone_heating_demand_mode", "fallback_mode", "heating_demand_mode"):
         assert key in strings["selector"]
-    assert set(strings["selector"]["schedule_period"]["fields"]) == {"start", "end", "temperature"}
+    assert set(strings["selector"]["schedule_period"]["fields"]) == {"start", "temperature"}
     assert set(strings["selector"]["last_seen_sensor"]["fields"]) == {"temperature", "last_seen"}
     assert "yaml_imported" in strings["issues"]
