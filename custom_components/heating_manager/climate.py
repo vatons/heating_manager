@@ -407,15 +407,29 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         analytics = room_data.get("heating_analytics")
         if analytics:
             attrs["heating_analytics"] = {
-                "heating_rate_per_hour": analytics.get("heating_rate"),
-                "cooling_rate_per_hour": analytics.get("cooling_rate"),
+                # Learned from whole heated stretches: warm-up, then rate once warming
+                "heating": {
+                    "rate_per_hour": _round(analytics.get("heating_rate")),
+                    "warm_up_minutes": analytics.get("warm_up_minutes"),
+                    "stretches": analytics.get("heating_stretches", 0),
+                },
+                # Learned from stretches without heat; heat loss needs an outdoor temperature
+                "cooling": {
+                    "rate_per_hour": _round(analytics.get("cooling_rate")),
+                    "heat_loss_per_degree": _round(analytics.get("heat_loss_per_degree"), 3),
+                    "stretches": analytics.get("cooling_stretches", 0),
+                },
+                "current": {
+                    "state": analytics.get("current_state"),
+                    "minutes": analytics.get("current_minutes"),
+                    "rate_per_hour": _round(analytics.get("rate_so_far")),
+                    "trend": analytics.get("trend"),
+                },
                 "estimated_time_to_target": {
                     "minutes": analytics.get("eta_minutes"),
                     "timestamp": analytics.get("eta_timestamp"),
-                    "confidence_percent": round(analytics.get("confidence", 0) * 100) if analytics.get("confidence") is not None else None,
+                    "confidence_percent": round(analytics.get("confidence", 0) * 100),
                 },
-                "temperature_trend": analytics.get("trend"),
-                "samples_count": analytics.get("samples_count"),
             }
 
         return attrs
@@ -954,6 +968,7 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
             "away_mode": self.coordinator.away_mode,
             "total_zones": len(self.coordinator.data),
             "demand_hold": self.coordinator.global_demand_hold,
+            "outdoor_temperature": self.coordinator.outdoor_temperature,
             "zones_demanding_heat": len(zones_needing_heat),
 
             # Heating demand

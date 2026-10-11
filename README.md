@@ -657,42 +657,57 @@ Set under **Configure → Settings → TRV control**:
 
 ### Heating Analytics
 
-The integration includes an optional heating analytics system that tracks temperature history and calculates performance metrics for each room. This provides valuable insights into heating efficiency and helps estimate when rooms will reach their target temperatures.
+Heating Manager learns how each room heats up and cools down, and uses that to estimate when it will reach its target. It's on by default and only reports: it doesn't change how rooms are heated.
 
-**Features:**
-- **Heating Rate**: Measures how quickly rooms heat up (°C per hour)
-- **Cooling Rate**: Measures how quickly rooms cool down (°C per hour)
-- **ETA Estimation**: Predicts when a room will reach its target temperature
-- **Confidence Scoring**: Indicates reliability of predictions (0.0-1.0)
-- **Trend Analysis**: Categorizes heating behavior (heating_rapidly, heating_slowly, stable, cooling_slowly, cooling_rapidly, insufficient_data)
+**How it learns.** Each room's readings are split into stretches: *heated* while the room wants heat and its zone's [heat source](#heat-source) is on, *not heated* otherwise. When a stretch ends, what it showed is added to the room's long-term figures, which are saved across restarts:
+- **Warm-up time**: how long after heat starts the room begins to warm (radiators take a while to get hot).
+- **Heating rate**: how fast the room warms after that. Every reading in the stretch is fitted as a flat warm-up bending into a straight climb, so sensors that report in 0.1 °C or 0.5 °C steps, or flicker, still give the right answer.
+- **Cooling rate**: how fast the room cools without heat, ignoring the first 15 minutes after heating stops (radiators are still warm).
+- **Heat loss per degree**: with an **Outdoor temperature** set (below), the cooling rate divided by how much warmer the room is than outside. Unlike the cooling rate, it doesn't change with the weather.
 
-**Configuration:** **Configure → Settings → Analytics**: Heating analytics (on), Analytics history size (30 readings), Analytics minimum samples (3) and Analytics smoothing (0.3).
+Heated stretches need at least 10 minutes of warming and not-heated ones at least 30 minutes after the radiators cool, so short blips are ignored. Very long stretches (e.g. a room left unheated all summer) are learned from every 3 hours. Only the room's own sensors are used: while a room falls back to the zone average or its TRVs' temperature, nothing is learned.
 
-**Analytics data is available in room climate entity attributes:**
+**Time to target.** While a room wants heat: its warm-up time still to come, plus the rest of the climb at its heating rate. While it's cooling to a lower target: with heat loss known, a cooling curve that slows as the room nears the outside temperature; otherwise its cooling rate.
+
+**Outdoor temperature.** Set in **Configure → Settings → Sensors → Outdoor temperature**: a temperature sensor or a weather entity, shared by every room. Optional; without it there's no heat loss figure, and cooling estimates use the plain cooling rate. The whole-house entity shows it as `outdoor_temperature`.
+
+**Configuration:** **Configure → Settings → Analytics**: Heating analytics (on), Analytics minimum stretches (3: stretches a room needs before a rate is shown) and Analytics learning rate (0.3: how much each new stretch moves a room's figures).
+
+**In each room climate entity's attributes:**
 ```yaml
 heating_analytics:
-  heating_rate_per_hour: 1.8        # °C per hour when heating
-  cooling_rate_per_hour: -0.4       # °C per hour when not heating
+  heating:
+    rate_per_hour: 1.1          # °C per hour once warming
+    warm_up_minutes: 14         # from heat starting to the room warming
+    stretches: 23               # heated stretches learned from
+  cooling:
+    rate_per_hour: -0.4         # °C per hour without heat
+    heat_loss_per_degree: 0.035 # °C/h per °C warmer than outside (needs an outdoor temperature)
+    stretches: 31
+  current:
+    state: heated               # or not_heated
+    minutes: 22                 # how long this stretch has lasted
+    rate_per_hour: 0.9          # in this stretch so far
+    trend: heating_slowly       # heating_rapidly, heating_slowly, stable, cooling_slowly, cooling_rapidly, insufficient_data
   estimated_time_to_target:
-    minutes: 45                     # Estimated minutes to reach target
-    timestamp: "2024-01-15T14:30:00+00:00"  # When target will be reached
-    confidence_percent: 85          # Confidence in prediction (0-100)
-  temperature_trend: "heating_rapidly"  # Current heating trend
-  samples_count: 15                 # Number of samples used
+    minutes: 38
+    timestamp: "2026-01-15T14:30:00+00:00"
+    confidence_percent: 70
 ```
 
+Figures appear once a room has learned from enough stretches, typically within a day of normal heating. Analytics from before 3.6 aren't carried over: they came from a method that read coarse sensors as not warming at all.
+
 **Use cases:**
-- Monitor heating efficiency across different rooms
-- Identify rooms that heat/cool unusually slowly (possible insulation issues)
-- Build automations that pre-heat rooms before scheduled times
-- Display estimated time to reach target in UI dashboards
+- Spot rooms that heat slowly or lose heat quickly (radiator size, insulation, draughts)
+- Show the estimated time to reach target on a dashboard
+- Pre-heat rooms before a scheduled time in an automation, using the warm-up time and heating rate
 
 **Disabling analytics:**
-If you don't need this feature, turn off **Heating analytics** in **Configure → Settings → Analytics** to reduce storage and processing.
+If you don't need this feature, turn off **Heating analytics** in **Configure → Settings → Analytics**.
 
 #### Heat source
 
-Heating Manager only asks for heat; your boiler automation decides whether the boiler runs. So the heating rate is learned only while heat is actually going into a room: the room wants heat **and** the zone's heat source is on. Time when a room wants heat but none arrives (a zone in `zone_average` mode that isn't calling, the minimum boiler off time, your boiler automation or the boiler's own timer, hot water priority) counts towards the cooling rate instead.
+Heating Manager only asks for heat; your boiler automation decides whether the boiler runs. So a room counts as heated, for analytics, only while heat is actually going in: the room wants heat **and** the zone's heat source is on. Time when a room wants heat but none arrives (a zone in `zone_average` mode that isn't calling, the minimum boiler off time, your boiler automation or the boiler's own timer, hot water priority) counts as not heated instead.
 
 To tell Heating Manager when the heat source is on, set **Heat source** under **Advanced** in the zone's form:
 - a switch, binary sensor or input boolean that's on while the boiler is heating (e.g. a boiler relay, or an OpenTherm flame sensor), or
