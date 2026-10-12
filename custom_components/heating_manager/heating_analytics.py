@@ -18,6 +18,13 @@ showed is folded into the room's long-term figures:
 Only readings from the room's own sensors are used; fallback temperatures (zone
 average, TRV) are skipped. Learned figures are saved; the stretch in progress
 isn't.
+
+Each heated stretch is also logged with what it started from: how long heat had
+already been flowing (a cold boiler or one already hot), how many TRVs were taking
+heat, how long since the room was last heated, the outdoor temperature and how far
+the room had to climb. The log isn't used for estimates yet; it is the data for
+warming a room up in time for a schedule change (see diagnostics). It is saved in
+its own file, one compact line per stretch, and only when a stretch is added.
 """
 from __future__ import annotations
 
@@ -53,6 +60,19 @@ MAX_STRETCH_SPAN = timedelta(hours=3)
 MIN_INDOOR_OUTDOOR_DIFFERENCE = 3.0
 # The rate of the stretch in progress is shown once it covers this long
 MIN_LIVE_SPAN = timedelta(minutes=5)
+# Heated stretches kept in each room's log (a few weeks of heating)
+LOG_SIZE = 200
+LOG_FORMAT = 1
+# The log's fields, in the order saved: each entry is stored as one line of
+# comma-separated values with these columns
+LOG_COLUMNS = (
+    "start", "minutes", "continued", "start_temp", "end_temp", "target", "climb_needed",
+    "outdoor", "warm_up_minutes", "rate", "zone_heat_minutes", "house_heat_minutes",
+    "trvs_heating", "trvs_heating_mean", "minutes_since_heated",
+)
+_LOG_TEXT = {"start"}
+_LOG_BOOL = {"continued"}
+_LOG_INT = {"trvs_heating"}
 
 
 @dataclass
@@ -131,6 +151,12 @@ class _Stretch:
     fit: _LineFit | None = None
     # Heated: every reading (hours since start, °C), fitted as warm-up + climb at the end
     readings: list[tuple[float, float]] = field(default_factory=list)
+    # Heated: what the stretch started from, and running means, for the log
+    context: dict[str, Any] = field(default_factory=dict)
+    sum_outdoor: float = 0.0
+    n_outdoor: int = 0
+    sum_trvs: float = 0.0
+    n_trvs: int = 0
 
 
 @dataclass
@@ -145,6 +171,8 @@ class _Room:
     heat_loss: float | None = None    # °C/h lost per °C warmer than outside
     heat_loss_stretches: int = 0
     last_heated: bool | None = None   # state of the previous stretch
+    last_heated_at: datetime | None = None  # end of the last heated stretch
+    log: list[dict[str, Any]] = field(default_factory=list, repr=False)
     stretch: _Stretch | None = field(default=None, repr=False)
 
     LEARNED = (
@@ -153,7 +181,9 @@ class _Room:
     )
 
     def to_dict(self) -> dict[str, Any]:
-        return {key: getattr(self, key) for key in self.LEARNED}
+        data = {key: getattr(self, key) for key in self.LEARNED}
+        data["last_heated_at"] = None if self.last_heated_at is None else self.last_heated_at.isoformat()
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> _Room:
@@ -163,6 +193,8 @@ class _Room:
             if value is None:
                 continue
             setattr(room, key, int(value) if key.endswith("stretches") else float(value))
+        if (last_heated_at := data.get("last_heated_at")) is not None:
+            room.last_heated_at = dt_util.parse_datetime(last_heated_at)
         return room
 
 
@@ -178,6 +210,8 @@ class HeatingAnalytics:
         self.min_stretches = max(1, int(min_stretches))
         self.learning_rate = learning_rate
         self.rooms: dict[str, dict[str, _Room]] = {}
+        # Goes up whenever a stretch is logged, so the log is saved only when it changed
+        self.log_version = 0
 
     def _room(self, zone_id: str, room_id: str) -> _Room:
         return self.rooms.setdefault(zone_id, {}).setdefault(room_id, _Room())
@@ -197,6 +231,7 @@ class HeatingAnalytics:
         heat_flowing: bool | None = None,
         own_sensors: bool = True,
         outdoor_temp: float | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
         """Add a reading.
 
@@ -207,6 +242,10 @@ class HeatingAnalytics:
             own_sensors: temp comes from the room's own sensors; other readings
                 aren't learned from and end the stretch
             outdoor_temp: outdoor temperature (°C), if known
+            context: for the log of heated stretches: target, trvs_heating (TRVs
+                across the house taking heat), zone_heat_minutes and
+                house_heat_minutes (how long heat has been flowing in the zone and
+                anywhere; None if not known)
         """
         timestamp = dt_util.utcnow() if timestamp is None else dt_util.as_utc(timestamp)
         heated = bool(needs_heating) and heat_flowing is not False
@@ -228,26 +267,41 @@ class HeatingAnalytics:
         if stretch is not None and stretch.last is not None and stretch.last - stretch.start >= MAX_STRETCH_SPAN:
             # Learn from what's there and carry on without a gap
             self._end_stretch(room, learn=True)
-            stretch = self._start(room, heated, timestamp, temp, continued=True)
+            stretch = self._start(room, heated, timestamp, temp, continued=True, context=context)
         if stretch is None:
-            stretch = self._start(room, heated, timestamp, temp)
-        self._add(stretch, timestamp, temp, outdoor_temp)
+            stretch = self._start(room, heated, timestamp, temp, context=context)
+        self._add(stretch, timestamp, temp, outdoor_temp, context)
 
-    def _start(self, room: _Room, heated: bool, timestamp: datetime, temp: float, continued: bool = False) -> _Stretch:
+    def _start(
+        self, room: _Room, heated: bool, timestamp: datetime, temp: float,
+        continued: bool = False, context: dict[str, Any] | None = None,
+    ) -> _Stretch:
         # After a restart the previous state isn't known: assume radiators may still be warm
         after_heat = not heated and room.last_heated is not False and not continued
         stretch = _Stretch(
             heated=heated, start=timestamp, start_temperature=temp,
             after_heat=after_heat, continued=continued,
         )
+        if heated:
+            since = None if room.last_heated_at is None else _minutes(timestamp - room.last_heated_at)
+            stretch.context = {**(context or {}), "minutes_since_heated": 0 if continued else since}
         if continued and heated:
             stretch.rise_at = timestamp           # already warming
         room.stretch = stretch
         return stretch
 
     @staticmethod
-    def _add(stretch: _Stretch, timestamp: datetime, temp: float, outdoor: float | None) -> None:
+    def _add(
+        stretch: _Stretch, timestamp: datetime, temp: float, outdoor: float | None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
         if stretch.heated:
+            if outdoor is not None:
+                stretch.sum_outdoor += outdoor
+                stretch.n_outdoor += 1
+            if context and context.get("trvs_heating") is not None:
+                stretch.sum_trvs += context["trvs_heating"]
+                stretch.n_trvs += 1
             stretch.readings.append(((timestamp - stretch.start).total_seconds() / 3600.0, temp))
             if stretch.rise_at is None and temp >= stretch.start_temperature + RISE_THRESHOLD - 1e-9:
                 stretch.rise_at = timestamp
@@ -271,18 +325,25 @@ class HeatingAnalytics:
         if stretch is None:
             return
         room.last_heated = stretch.heated
+        if stretch.heated and stretch.last is not None:
+            room.last_heated_at = stretch.last
         if not learn or stretch.last is None:
             return
         fit = stretch.fit
         if stretch.heated:
             result = _warm_up_and_climb(stretch.readings)
-            if result is None:
-                return
-            warm_up_hours, slope = result
-            if not stretch.continued and stretch.last - stretch.start >= MIN_HEATED_STRETCH:
-                room.warm_up_minutes = self._learn(room.warm_up_minutes, warm_up_hours * 60)
-            room.heating_rate = self._learn(room.heating_rate, slope)
-            room.heating_stretches += 1
+            warm_up = None
+            if result is not None:
+                warm_up_hours, slope = result
+                if not stretch.continued and stretch.last - stretch.start >= MIN_HEATED_STRETCH:
+                    warm_up = warm_up_hours * 60
+                    room.warm_up_minutes = self._learn(room.warm_up_minutes, warm_up)
+                room.heating_rate = self._learn(room.heating_rate, slope)
+                room.heating_stretches += 1
+            if len(stretch.readings) >= 2:
+                room.log.append(_log_entry(stretch, warm_up, None if result is None else result[1]))
+                del room.log[:-LOG_SIZE]
+                self.log_version += 1
             return
         if fit is None or fit.span < MIN_COOLING_SPAN or (slope := fit.slope()) is None:
             return
@@ -294,6 +355,11 @@ class HeatingAnalytics:
             if difference >= MIN_INDOOR_OUTDOOR_DIFFERENCE and slope < 0:
                 room.heat_loss = self._learn(room.heat_loss, -slope / difference)
                 room.heat_loss_stretches += 1
+
+    def get_log(self, zone_id: str, room_id: str) -> list[dict[str, Any]]:
+        """The room's logged heated stretches, oldest first."""
+        room = self.rooms.get(zone_id, {}).get(room_id)
+        return [] if room is None else list(room.log)
 
     def skip_reading(self, zone_id: str, room_id: str) -> None:
         """No usable temperature this update: end the stretch without learning from it."""
@@ -352,6 +418,7 @@ class HeatingAnalytics:
             eta_minutes=eta_minutes,
             eta_timestamp=eta_timestamp,
             confidence=confidence,
+            logged_stretches=len(room.log),
         )
 
     def _time_to_target(
@@ -415,6 +482,115 @@ class HeatingAnalytics:
                     self.rooms.setdefault(zone_id, {})[room_id] = _Room.from_dict(data)
                 except (TypeError, ValueError, AttributeError) as err:
                     _LOGGER.warning("Could not restore analytics for %s/%s: %s", zone_id, room_id, err)
+
+    def get_log_for_storage(self) -> dict:
+        """Every room's log, one comma-separated line per stretch (columns named once)."""
+        return {
+            "format": LOG_FORMAT,
+            "columns": list(LOG_COLUMNS),
+            "rooms": {
+                zone_id: {room_id: [_encode(entry) for entry in room.log] for room_id, room in rooms.items() if room.log}
+                for zone_id, rooms in self.rooms.items()
+                if any(room.log for room in rooms.values())
+            },
+        }
+
+    def restore_log(self, stored: Any, keep: dict[str, Any] | None = None) -> None:
+        """Restore the log. Rooms not in `keep` (zone_id -> room ids), if given, are dropped;
+        unreadable lines are skipped. Columns are matched by name, so a log saved with
+        more or fewer columns still loads."""
+        if not isinstance(stored, dict) or stored.get("format") != LOG_FORMAT:
+            return
+        columns = stored.get("columns")
+        if not isinstance(columns, list):
+            return
+        for zone_id, rooms in (stored.get("rooms") or {}).items():
+            if not isinstance(rooms, dict):
+                continue
+            for room_id, lines in rooms.items():
+                if keep is not None and room_id not in keep.get(zone_id, ()):
+                    continue
+                if not isinstance(lines, list):
+                    continue
+                log = [entry for line in lines if (entry := _decode(columns, line)) is not None]
+                if log:
+                    self._room(zone_id, room_id).log = log[-LOG_SIZE:]
+
+
+def _encode(entry: dict[str, Any]) -> str:
+    values = []
+    for column in LOG_COLUMNS:
+        value = entry.get(column)
+        if value is None:
+            values.append("")
+        elif column in _LOG_BOOL:
+            values.append("1" if value else "0")
+        elif isinstance(value, float) and value.is_integer():
+            values.append(str(int(value)))
+        else:
+            values.append(str(value))
+    return ",".join(values)
+
+
+def _decode(columns: list[str], line: Any) -> dict[str, Any] | None:
+    if not isinstance(line, str):
+        return None
+    values = line.split(",")
+    if len(values) != len(columns):
+        return None
+    entry: dict[str, Any] = dict.fromkeys(LOG_COLUMNS)
+    try:
+        for column, value in zip(columns, values):
+            if column not in entry or value == "":
+                continue
+            if column in _LOG_TEXT:
+                entry[column] = value
+            elif column in _LOG_BOOL:
+                entry[column] = value == "1"
+            elif column in _LOG_INT:
+                entry[column] = int(value)
+            else:
+                entry[column] = float(value)
+    except ValueError:
+        return None
+    if entry["start"] is None or dt_util.parse_datetime(entry["start"]) is None:
+        return None
+    return entry
+
+
+def _minutes(delta: timedelta) -> float:
+    return round(delta.total_seconds() / 60, 1)
+
+
+def _round(value: float | None, digits: int = 2) -> float | None:
+    return None if value is None else round(value, digits)
+
+
+def _log_entry(stretch: _Stretch, warm_up: float | None, rate: float | None) -> dict[str, Any]:
+    """One heated stretch for the log: what it started from and what it showed."""
+    context = stretch.context
+    target = context.get("target")
+    return {
+        "start": stretch.start.isoformat(),
+        "minutes": _minutes(stretch.last - stretch.start),
+        # Carries on a longer stretch: already warming, no warm-up
+        "continued": stretch.continued,
+        "start_temp": _round(stretch.start_temperature),
+        "end_temp": _round(stretch.last_temperature),
+        "target": _round(target),
+        "climb_needed": None if target is None else _round(target - stretch.start_temperature),
+        "outdoor": _round(stretch.sum_outdoor / stretch.n_outdoor, 1) if stretch.n_outdoor else None,
+        "warm_up_minutes": _round(warm_up, 1),
+        "rate": _round(rate, 3),
+        # How hot the system already was: minutes heat had flowed in the zone / anywhere (0: cold start)
+        "zone_heat_minutes": context.get("zone_heat_minutes"),
+        "house_heat_minutes": context.get("house_heat_minutes"),
+        # How many radiators shared the heat: TRVs in heated rooms across the house
+        "trvs_heating": context.get("trvs_heating"),
+        "trvs_heating_mean": _round(stretch.sum_trvs / stretch.n_trvs, 1) if stretch.n_trvs else None,
+        # Radiator still warm? Minutes since this room's last heated stretch ended
+        "minutes_since_heated": context.get("minutes_since_heated"),
+    }
 
 
 def _warm_up_and_climb(readings: list[tuple[float, float]]) -> tuple[float, float] | None:
