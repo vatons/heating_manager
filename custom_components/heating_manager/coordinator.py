@@ -146,6 +146,9 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         self.rooms_off: dict[str, list[str]] = {}  # zone_id -> room_ids switched off by the user
         # zone_id -> room_id -> whether heat was going into the room at the last update
         self._room_heated: dict[str, dict[str, bool]] = {}
+        # zone_id -> when its heat started flowing (None: already flowing at startup, not known)
+        self._heat_flow_since: dict[str, datetime | None] = {}
+        self._heat_flow_seen: set[str] = set()
         # zone_id -> room_id -> boost minutes, set on the room's boost duration entity
         self.boost_durations: dict[str, dict[str, int]] = {}
         self._missing_since: dict[str, datetime] = {}  # entity_id -> first seen missing (UTC)
@@ -462,6 +465,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             for zone_id in _expired_zone_overrides:
                 self.manual_zone_temp.pop(zone_id, None)
 
+            self._record_analytics(result, current_time)
             self._async_check_missing_entities(zones)
 
             # Global demand (any zone), with the same minimum on/off times, so zones
@@ -608,7 +612,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         return state.state == "on"
 
     def _update_heat_flow(self, zone_id: str, zone_config: dict, zone_data: dict, current_time) -> None:
-        """Work out whether heat is going into each room, and record analytics with it.
+        """Work out whether heat is going into each room.
 
         Heat flows to a room when it wants heat and the zone's heat source is on:
         the configured heat source entity, else the zone's own (held) call for heat.
@@ -625,27 +629,65 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         zone_data["heat_flowing"] = heat_flowing
         zone_data["heat_flowing_basis"] = basis
 
+        if not heat_flowing:
+            self._heat_flow_since.pop(zone_id, None)
+        elif zone_id not in self._heat_flow_since:
+            # Flowing at the first update after a start: when it began isn't known
+            self._heat_flow_since[zone_id] = (
+                dt_util.as_utc(current_time) if zone_id in self._heat_flow_seen else None
+            )
+        self._heat_flow_seen.add(zone_id)
+
         for room_id, room_data in zone_data["rooms"].items():
             heated = bool(room_data["needs_heating"]) and heat_flowing
             room_data["heated"] = heated
             self._room_heated.setdefault(zone_id, {})[room_id] = heated
-            room_temp = room_data["temperature"]
-            if self.heating_analytics is None:
-                continue
-            if room_temp is None:
-                self.heating_analytics.skip_reading(zone_id, room_id)
-                continue
-            self.heating_analytics.record_temperature(
-                zone_id, room_id, room_temp, room_data["needs_heating"], current_time,
-                heat_flowing=heat_flowing,
-                # Fallback temperatures (zone average, TRV) aren't learned from
-                own_sensors=room_data["temperature_source"] == "local_sensors",
-                outdoor_temp=self.outdoor_temperature,
-            )
-            room_data["heating_analytics"] = self.heating_analytics.get_analytics(
-                zone_id, room_id, room_temp, room_data["target_temperature"], room_data["needs_heating"],
-                outdoor_temp=self.outdoor_temperature, now=current_time,
-            ).to_dict()
+
+    def _heat_minutes(self, zone_ids, now) -> float | None:
+        """Minutes heat has been flowing in any of these zones (0: none is; None: not known)."""
+        flowing = [self._heat_flow_since[zone_id] for zone_id in zone_ids if zone_id in self._heat_flow_since]
+        if not flowing:
+            return 0.0
+        if None in flowing:
+            return None
+        return round((now - min(flowing)).total_seconds() / 60, 1)
+
+    def _record_analytics(self, result: dict, current_time) -> None:
+        """Record every room's reading, with what the whole house is doing for the log."""
+        if self.heating_analytics is None:
+            return
+        now = dt_util.as_utc(current_time)
+        trvs_heating = sum(
+            len(room_data.get("trvs", []))
+            for zone_data in result.values()
+            for room_data in zone_data["rooms"].values()
+            if room_data.get("heated")
+        )
+        house_heat_minutes = self._heat_minutes(result, now)
+        for zone_id, zone_data in result.items():
+            zone_heat_minutes = self._heat_minutes([zone_id], now)
+            for room_id, room_data in zone_data["rooms"].items():
+                room_temp = room_data["temperature"]
+                if room_temp is None:
+                    self.heating_analytics.skip_reading(zone_id, room_id)
+                    continue
+                self.heating_analytics.record_temperature(
+                    zone_id, room_id, room_temp, room_data["needs_heating"], current_time,
+                    heat_flowing=zone_data["heat_flowing"],
+                    # Fallback temperatures (zone average, TRV) aren't learned from
+                    own_sensors=room_data["temperature_source"] == "local_sensors",
+                    outdoor_temp=self.outdoor_temperature,
+                    context={
+                        "target": room_data["target_temperature"],
+                        "trvs_heating": trvs_heating,
+                        "zone_heat_minutes": zone_heat_minutes,
+                        "house_heat_minutes": house_heat_minutes,
+                    },
+                )
+                room_data["heating_analytics"] = self.heating_analytics.get_analytics(
+                    zone_id, room_id, room_temp, room_data["target_temperature"], room_data["needs_heating"],
+                    outdoor_temp=self.outdoor_temperature, now=current_time,
+                ).to_dict()
 
     @callback
     def _async_check_missing_entities(self, zones: dict) -> None:

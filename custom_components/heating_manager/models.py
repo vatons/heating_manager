@@ -43,6 +43,7 @@ class HeatingAnalyticsData:
     eta_minutes: int | None             # minutes until the target is reached
     eta_timestamp: datetime | None
     confidence: float                   # 0.0-1.0
+    logged_stretches: int = 0           # heated stretches in the room's log
 
     def to_dict(self) -> dict:
         """Convert to a dictionary for the room's data."""
@@ -50,6 +51,7 @@ class HeatingAnalyticsData:
             "heating_rate": self.heating_rate,
             "warm_up_minutes": self.warm_up_minutes,
             "heating_stretches": self.heating_stretches,
+            "logged_stretches": self.logged_stretches,
             "cooling_rate": self.cooling_rate,
             "heat_loss_per_degree": self.heat_loss_per_degree,
             "cooling_stretches": self.cooling_stretches,

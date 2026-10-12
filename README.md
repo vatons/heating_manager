@@ -680,6 +680,7 @@ heating_analytics:
     rate_per_hour: 1.1          # °C per hour once warming
     warm_up_minutes: 14         # from heat starting to the room warming
     stretches: 23               # heated stretches learned from
+    logged: 41                  # heated stretches in the room's log (see below)
   cooling:
     rate_per_hour: -0.4         # °C per hour without heat
     heat_loss_per_degree: 0.035 # °C/h per °C warmer than outside (needs an outdoor temperature)
@@ -701,6 +702,18 @@ Figures appear once a room has learned from enough stretches, typically within a
 - Spot rooms that heat slowly or lose heat quickly (radiator size, insulation, draughts)
 - Show the estimated time to reach target on a dashboard
 - Pre-heat rooms before a scheduled time in an automation, using the warm-up time and heating rate
+
+**Log of heated stretches.** Each room also keeps its last 200 heated stretches, with what each started from and what it showed. A room's warm-up depends on more than the room: heat joining a boiler that's already hot arrives in minutes, a cold start with every radiator calling takes much longer, and a radiator heated half an hour ago is still warm. The log is the data for warming rooms up in time for a schedule change in a future version; it doesn't change any estimate yet. Download it from **Settings → Devices & services → Heating Manager → ⋮ → Download diagnostics**. Each entry has:
+
+| Field | Meaning |
+|---|---|
+| `start`, `minutes`, `continued` | When the stretch started and how long it lasted; `continued` carries on a stretch longer than 3 hours (already warming, no warm-up) |
+| `start_temp`, `end_temp`, `target`, `climb_needed` | Room temperatures, and how far below its target it started |
+| `warm_up_minutes`, `rate` | What the stretch showed (empty if it didn't warm) |
+| `outdoor` | Mean outdoor temperature, if set |
+| `zone_heat_minutes`, `house_heat_minutes` | How long heat had already been flowing in the room's zone, and in any zone, when the stretch started: 0 is a cold start; empty if heat was already on when Home Assistant started |
+| `trvs_heating`, `trvs_heating_mean` | TRVs across the house in heated rooms at the start, and on average through the stretch |
+| `minutes_since_heated` | Minutes since the room was last heated (empty if not known) |
 
 **Disabling analytics:**
 If you don't need this feature, turn off **Heating analytics** in **Configure → Settings → Analytics**.

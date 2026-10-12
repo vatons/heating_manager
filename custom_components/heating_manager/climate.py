@@ -412,6 +412,7 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
                     "rate_per_hour": _round(analytics.get("heating_rate")),
                     "warm_up_minutes": analytics.get("warm_up_minutes"),
                     "stretches": analytics.get("heating_stretches", 0),
+                    "logged": analytics.get("logged_stretches", 0),
                 },
                 # Learned from stretches without heat; heat loss needs an outdoor temperature
                 "cooling": {
