@@ -753,6 +753,8 @@ Set in **Configure → Settings → Sensors → When a room's sensors are unavai
 
 If `trv` or `last_known` has no data, the zone average is used. TRV offsets are only learned from the room's own sensors, never from a fallback temperature.
 
+After Home Assistant restarts, some sensor integrations (Zigbee2MQTT, ZHA, cloud integrations) take a few minutes to load. For the first 10 minutes, a room whose sensors haven't loaded yet (or are unavailable) keeps the readings it had before the restart, if they are under 24 hours old, instead of dropping to the fallback. This avoids spikes in the room's graph. The room's `temperature_source` attribute shows `restored` while this happens. These readings aren't used for learning TRV offsets or for analytics.
+
 A room with TRVs but **no sensors configured** always uses its TRVs' own temperature (then the zone average), whatever this setting, so it still calls for heat on its own. TRV sensors usually read warmer than the room, so expect such rooms to run a little cool; a room sensor is better.
 
 ### Fahrenheit
