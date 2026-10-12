@@ -38,6 +38,11 @@ from .units import sensor_celsius, to_celsius
 _LOGGER = logging.getLogger(__name__)
 
 STATE_SAVE_DELAY = 300  # seconds; learned state is written at most this often
+# The log of heated stretches is its own file, written only after a stretch is
+# logged and at most this often (and when Home Assistant stops)
+LOG_STORAGE_KEY = f"{DOMAIN}.analytics_log"
+LOG_STORAGE_VERSION = 1
+LOG_SAVE_DELAY = 1800  # seconds
 MISSING_ENTITY_GRACE = timedelta(minutes=10)  # allow integrations to load after a restart
 MISSING_ENTITIES_ISSUE = "missing_entities"
 
@@ -136,6 +141,8 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         self.heating_deadband = heating_deadband
         self.heating_demand_mode = config.get(CONF_HEATING_DEMAND_MODE, DEFAULT_HEATING_DEMAND_MODE)
         self._store = _HeatingManagerStore(hass, STORAGE_VERSION, STORAGE_KEY)
+        self._log_store: Store = Store(hass, LOG_STORAGE_VERSION, LOG_STORAGE_KEY)
+        self._log_saved_version = 0
 
         # Runtime state
         self.away_mode = False
@@ -466,6 +473,8 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 self.manual_zone_temp.pop(zone_id, None)
 
             self._record_analytics(result, current_time)
+            if self.heating_analytics is not None and self.heating_analytics.log_version != self._log_saved_version:
+                self._log_store.async_delay_save(self._log_data, LOG_SAVE_DELAY)
             self._async_check_missing_entities(zones)
 
             # Global demand (any zone), with the same minimum on/off times, so zones
@@ -988,9 +997,28 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 analytics_history = data.get("analytics_history", {})
                 self.heating_analytics.restore_history(analytics_history)
 
+        if self.heating_analytics is not None:
+            # Rooms deleted since the last save don't keep a log
+            zones = self.config.get("zones", {})
+            self.heating_analytics.restore_log(
+                await self._log_store.async_load(),
+                keep={
+                    zone_id: set(rooms)
+                    for zone_id, zone in zones.items()
+                    if isinstance(zone, dict) and isinstance(rooms := zone.get("rooms"), dict)
+                },
+            )
+
     async def async_save_state(self) -> None:
         """Save persistent state to storage now."""
         await self._save_state()
+        if self.heating_analytics is not None and self.heating_analytics.log_version != self._log_saved_version:
+            await self._log_store.async_save(self._log_data())
+
+    def _log_data(self) -> dict:
+        """The log of heated stretches, for its own file."""
+        self._log_saved_version = self.heating_analytics.log_version
+        return self.heating_analytics.get_log_for_storage()
 
     async def _save_state(self) -> None:
         """Save persistent state to storage."""

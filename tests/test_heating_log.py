@@ -3,6 +3,7 @@ many TRVs shared the heat, how long since the room was last heated) and what it 
 from __future__ import annotations
 
 from datetime import timedelta
+import json
 
 import pytest
 
@@ -105,26 +106,123 @@ def test_log_is_kept_to_its_size(analytics):
     assert log[-1]["start"] == (now - 6 * MINUTE).isoformat()
 
 
-def test_log_survives_a_restart(analytics):
-    now = feed(analytics, T0, 30, 18.0, True, rate=1.0, ctx=context())
-    feed(analytics, now, 2, 18.5, False)
+def restored_from(analytics, keep=None):
     restored = HeatingAnalytics(min_stretches=1, learning_rate=0.3)
     restored.restore_history(analytics.get_history_for_storage())
-    assert restored.get_log("z", "r") == analytics.get_log("z", "r")
+    restored.restore_log(json.loads(json.dumps(analytics.get_log_for_storage())), keep)
+    return restored
+
+
+def test_log_survives_a_restart(analytics):
+    now = feed(analytics, T0, 30, 18.0, True, rate=1.0, outdoor=4.5, ctx=context())
+    now = feed(analytics, now, 20, 18.5, False)
+    feed(analytics, now, 30, 18.2, True, rate=1.0, ctx=context(zone_heat_minutes=None, house_heat_minutes=None))
+    feed(analytics, now + 30 * MINUTE, 2, 18.7, False)
+    restored = restored_from(analytics)
+    assert restored.get_log("z", "r") == analytics.get_log("z", "r")     # every field and type
+    assert restored.get_log("z", "r")[1]["zone_heat_minutes"] is None
     assert restored.rooms["z"]["r"].last_heated_at == analytics.rooms["z"]["r"].last_heated_at
-    assert restored.get_analytics("z", "r", 18.5, 21.0, False).logged_stretches == 1
+    assert restored.get_analytics("z", "r", 18.5, 21.0, False).logged_stretches == 2
 
 
-def test_older_storage_without_a_log_restores(analytics):
+def test_learned_figures_dont_carry_the_log(analytics):
+    """The log has its own file: the state saved every few minutes stays small."""
+    now = feed(analytics, T0, 30, 18.0, True, rate=1.0, ctx=context())
+    feed(analytics, now, 2, 18.5, False)
+    assert "log" not in json.dumps(analytics.get_history_for_storage())
+
+
+def test_storage_from_before_the_log_restores(analytics):
     now = feed(analytics, T0, 30, 18.0, True, rate=1.0, ctx=context())
     feed(analytics, now, 2, 18.5, False)
     stored = analytics.get_history_for_storage()
     for room in stored["rooms"]["z"].values():
-        del room["log"], room["last_heated_at"]
+        del room["last_heated_at"]
     restored = HeatingAnalytics(min_stretches=1, learning_rate=0.3)
     restored.restore_history(stored)
+    restored.restore_log(None)
     assert restored.get_log("z", "r") == []
     assert restored.rooms["z"]["r"].heating_stretches == 1
+    assert restored.rooms["z"]["r"].last_heated_at is None
+
+
+def test_full_logs_stay_small_on_disk():
+    """Worst case: every room's log full, every field filled, as Home Assistant writes it
+    (indented JSON). Under 25 KB a room."""
+    from homeassistant.helpers.json import prepare_save_json
+
+    analytics = HeatingAnalytics(min_stretches=1, learning_rate=0.3)
+    entry = {
+        "start": "2026-01-14T06:05:00.123456+00:00", "minutes": 179.9, "continued": False,
+        "start_temp": 16.37, "end_temp": 21.41, "target": 21.5, "climb_needed": 5.13,
+        "outdoor": -12.3, "warm_up_minutes": 123.4, "rate": 1.234, "zone_heat_minutes": 1234.5,
+        "house_heat_minutes": 1234.5, "trvs_heating": 24, "trvs_heating_mean": 23.9,
+        "minutes_since_heated": 12345.6,
+    }
+    for zone in range(3):
+        for room in range(5):
+            analytics._room(f"zone_{zone}", f"room_{room}").log = [dict(entry)] * LOG_SIZE
+    _, data = prepare_save_json(analytics.get_log_for_storage())
+    assert len(data) < 15 * 25_000          # 15 rooms
+    restored = HeatingAnalytics(min_stretches=1, learning_rate=0.3)
+    restored.restore_log(json.loads(data))
+    assert restored.get_log("zone_2", "room_4")[-1] == entry
+
+
+def test_restore_skips_what_it_cant_read(analytics):
+    now = feed(analytics, T0, 30, 18.0, True, rate=1.0, ctx=context())
+    feed(analytics, now, 2, 18.5, False)
+    stored = analytics.get_log_for_storage()
+    good = stored["rooms"]["z"]["r"][0]
+    stored["rooms"]["z"]["r"] = [
+        good,
+        "not,enough,values",
+        good.replace("2026", "xxxx", 1),                     # bad start
+        good.split(",", 1)[0] + ",abc" + good[good.index(",", good.index(",") + 1):],  # bad number
+        42,
+        good,
+    ]
+    stored["rooms"]["z"]["other"] = "not a list"
+    stored["rooms"]["broken"] = None
+    restored = HeatingAnalytics(min_stretches=1, learning_rate=0.3)
+    restored.restore_log(stored)
+    assert len(restored.get_log("z", "r")) == 2
+    for bad in (None, [], {"format": 99}, {"format": 1, "columns": None}):
+        HeatingAnalytics(min_stretches=1, learning_rate=0.3).restore_log(bad)
+
+
+def test_restore_matches_columns_by_name(analytics):
+    """A log saved with columns in another order, an unknown one, or one missing, still loads."""
+    stored = {
+        "format": 1,
+        "columns": ["future_field", "rate", "start", "trvs_heating"],
+        "rooms": {"z": {"r": ["x,1.5,2026-01-14T06:00:00+00:00,3"]}},
+    }
+    analytics.restore_log(stored)
+    [entry] = analytics.get_log("z", "r")
+    assert (entry["rate"], entry["start"], entry["trvs_heating"]) == (1.5, "2026-01-14T06:00:00+00:00", 3)
+    assert entry["outdoor"] is None and "future_field" not in entry
+
+
+def test_restore_drops_deleted_rooms(analytics):
+    for room_id in ("r", "gone"):
+        now = T0
+        for minute in range(32):
+            analytics.record_temperature(
+                "z", room_id, 18.0 + minute / 60, minute < 30, now + minute * MINUTE, context=context(),
+            )
+    restored = restored_from(analytics, keep={"z": {"r"}})
+    assert len(restored.get_log("z", "r")) == 1
+    assert restored.get_log("z", "gone") == []
+
+
+def test_log_version_changes_only_when_a_stretch_is_logged(analytics):
+    now = feed(analytics, T0, 30, 18.0, True, rate=1.0, ctx=context())
+    assert analytics.log_version == 0                    # stretch still going
+    now = feed(analytics, now, 30, 18.5, False)
+    assert analytics.log_version == 1                    # heated stretch ended
+    feed(analytics, now, 30, 18.0, False)
+    assert analytics.log_version == 1                    # not heated: nothing logged
 
 
 # ---------------------------------------------------------------------------
@@ -230,3 +328,97 @@ async def test_diagnostics(hass, env):
     assert lounge["heated_stretches"] == []
     assert lounge["trvs"] == 1
     assert "settings" in diagnostics
+
+
+# ---------------------------------------------------------------------------
+# Saving: its own file, written only after a stretch is logged
+# ---------------------------------------------------------------------------
+
+async def heat_lounge_once(hass, coordinator, frozen, minutes=30):
+    """The lounge (17 °C) gets heat for a while, then the boiler stops."""
+    hass.states.async_set("switch.boiler_down", "on")
+    for _ in range(minutes // 5):
+        frozen.tick(timedelta(minutes=5))
+        report(hass)
+        await coordinator.async_refresh()
+    hass.states.async_set("switch.boiler_down", "off")
+    frozen.tick(timedelta(minutes=5))
+    report(hass)
+    await coordinator.async_refresh()
+
+
+async def wait(hass, frozen, seconds):
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    frozen.tick(timedelta(seconds=seconds))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+
+async def test_log_file_written_only_after_a_stretch_is_logged(
+    hass, hass_storage, add_trvs, make_coordinator, frozen
+):
+    from custom_components.heating_manager.const import STORAGE_KEY
+    from custom_components.heating_manager.coordinator import LOG_SAVE_DELAY, LOG_STORAGE_KEY
+
+    await setup_house(hass, add_trvs)
+    hass.states.async_set("switch.boiler_down", "off")
+    hass.states.async_set("switch.boiler_up", "off")
+    coordinator = make_coordinator(two_zones())
+    await coordinator.async_refresh()
+
+    # Updates without a stretch ending don't write the log
+    for _ in range(6):
+        frozen.tick(timedelta(minutes=5))
+        report(hass)
+        await coordinator.async_refresh()
+    await wait(hass, frozen, LOG_SAVE_DELAY + 1)
+    assert LOG_STORAGE_KEY not in hass_storage
+
+    # A stretch logged: written once the delay has passed, not straight away
+    await heat_lounge_once(hass, coordinator, frozen)
+    await wait(hass, frozen, 60)
+    assert LOG_STORAGE_KEY not in hass_storage
+    await wait(hass, frozen, LOG_SAVE_DELAY)
+    saved = hass_storage[LOG_STORAGE_KEY]["data"]
+    assert len(saved["rooms"]["down"]["lounge"]) == 1
+    # The state saved every few minutes doesn't carry it
+    await wait(hass, frozen, 600)
+    assert "lounge" in json.dumps(hass_storage[STORAGE_KEY]["data"]["analytics_history"])
+    assert '"log"' not in json.dumps(hass_storage[STORAGE_KEY])
+
+    # Nothing new: not written again
+    del hass_storage[LOG_STORAGE_KEY]
+    for _ in range(6):
+        frozen.tick(timedelta(minutes=5))
+        report(hass)
+        await coordinator.async_refresh()
+    await wait(hass, frozen, LOG_SAVE_DELAY + 1)
+    assert LOG_STORAGE_KEY not in hass_storage
+
+    # Saving on unload writes a pending log straight away
+    await heat_lounge_once(hass, coordinator, frozen)
+    await coordinator.async_save_state()
+    assert len(hass_storage[LOG_STORAGE_KEY]["data"]["rooms"]["down"]["lounge"]) == 2
+
+
+async def test_log_loaded_after_a_restart_without_deleted_rooms(
+    hass, hass_storage, add_trvs, make_coordinator, frozen
+):
+    from custom_components.heating_manager.coordinator import LOG_STORAGE_KEY
+
+    await setup_house(hass, add_trvs)
+    hass.states.async_set("switch.boiler_down", "off")
+    hass.states.async_set("switch.boiler_up", "off")
+    coordinator = make_coordinator(two_zones())
+    await coordinator.async_refresh()
+    await heat_lounge_once(hass, coordinator, frozen)
+    await coordinator.async_save_state()
+    hass_storage[LOG_STORAGE_KEY]["data"]["rooms"]["down"]["deleted_room"] = (
+        hass_storage[LOG_STORAGE_KEY]["data"]["rooms"]["down"]["lounge"]
+    )
+
+    after = make_coordinator(two_zones())
+    await after.async_refresh()               # loads saved state first
+    assert len(after.heating_analytics.get_log("down", "lounge")) == 1
+    assert after.heating_analytics.get_log("down", "deleted_room") == []

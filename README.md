@@ -703,7 +703,7 @@ Figures appear once a room has learned from enough stretches, typically within a
 - Show the estimated time to reach target on a dashboard
 - Pre-heat rooms before a scheduled time in an automation, using the warm-up time and heating rate
 
-**Log of heated stretches.** Each room also keeps its last 200 heated stretches, with what each started from and what it showed. A room's warm-up depends on more than the room: heat joining a boiler that's already hot arrives in minutes, a cold start with every radiator calling takes much longer, and a radiator heated half an hour ago is still warm. The log is the data for warming rooms up in time for a schedule change in a future version; it doesn't change any estimate yet. Download it from **Settings → Devices & services → Heating Manager → ⋮ → Download diagnostics**. Each entry has:
+**Log of heated stretches.** Each room also keeps its last 200 heated stretches, with what each started from and what it showed. A room's warm-up depends on more than the room: heat joining a boiler that's already hot arrives in minutes, a cold start with every radiator calling takes much longer, and a radiator heated half an hour ago is still warm. The log is the data for warming rooms up in time for a schedule change in a future version; it doesn't change any estimate yet. It's kept in its own file (`.storage/heating_manager.analytics_log`, under 25 KB a room when full), written only after a stretch is logged, at most every 30 minutes, and when Home Assistant stops. Download it from **Settings → Devices & services → Heating Manager → ⋮ → Download diagnostics**. Each entry has:
 
 | Field | Meaning |
 |---|---|

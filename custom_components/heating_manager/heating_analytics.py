@@ -23,7 +23,8 @@ Each heated stretch is also logged with what it started from: how long heat had
 already been flowing (a cold boiler or one already hot), how many TRVs were taking
 heat, how long since the room was last heated, the outdoor temperature and how far
 the room had to climb. The log isn't used for estimates yet; it is the data for
-warming a room up in time for a schedule change (see diagnostics).
+warming a room up in time for a schedule change (see diagnostics). It is saved in
+its own file, one compact line per stretch, and only when a stretch is added.
 """
 from __future__ import annotations
 
@@ -61,6 +62,17 @@ MIN_INDOOR_OUTDOOR_DIFFERENCE = 3.0
 MIN_LIVE_SPAN = timedelta(minutes=5)
 # Heated stretches kept in each room's log (a few weeks of heating)
 LOG_SIZE = 200
+LOG_FORMAT = 1
+# The log's fields, in the order saved: each entry is stored as one line of
+# comma-separated values with these columns
+LOG_COLUMNS = (
+    "start", "minutes", "continued", "start_temp", "end_temp", "target", "climb_needed",
+    "outdoor", "warm_up_minutes", "rate", "zone_heat_minutes", "house_heat_minutes",
+    "trvs_heating", "trvs_heating_mean", "minutes_since_heated",
+)
+_LOG_TEXT = {"start"}
+_LOG_BOOL = {"continued"}
+_LOG_INT = {"trvs_heating"}
 
 
 @dataclass
@@ -171,7 +183,6 @@ class _Room:
     def to_dict(self) -> dict[str, Any]:
         data = {key: getattr(self, key) for key in self.LEARNED}
         data["last_heated_at"] = None if self.last_heated_at is None else self.last_heated_at.isoformat()
-        data["log"] = self.log
         return data
 
     @classmethod
@@ -184,9 +195,6 @@ class _Room:
             setattr(room, key, int(value) if key.endswith("stretches") else float(value))
         if (last_heated_at := data.get("last_heated_at")) is not None:
             room.last_heated_at = dt_util.parse_datetime(last_heated_at)
-        log = data.get("log")
-        if isinstance(log, list):
-            room.log = [entry for entry in log if isinstance(entry, dict)][-LOG_SIZE:]
         return room
 
 
@@ -202,6 +210,8 @@ class HeatingAnalytics:
         self.min_stretches = max(1, int(min_stretches))
         self.learning_rate = learning_rate
         self.rooms: dict[str, dict[str, _Room]] = {}
+        # Goes up whenever a stretch is logged, so the log is saved only when it changed
+        self.log_version = 0
 
     def _room(self, zone_id: str, room_id: str) -> _Room:
         return self.rooms.setdefault(zone_id, {}).setdefault(room_id, _Room())
@@ -333,6 +343,7 @@ class HeatingAnalytics:
             if len(stretch.readings) >= 2:
                 room.log.append(_log_entry(stretch, warm_up, None if result is None else result[1]))
                 del room.log[:-LOG_SIZE]
+                self.log_version += 1
             return
         if fit is None or fit.span < MIN_COOLING_SPAN or (slope := fit.slope()) is None:
             return
@@ -471,6 +482,80 @@ class HeatingAnalytics:
                     self.rooms.setdefault(zone_id, {})[room_id] = _Room.from_dict(data)
                 except (TypeError, ValueError, AttributeError) as err:
                     _LOGGER.warning("Could not restore analytics for %s/%s: %s", zone_id, room_id, err)
+
+    def get_log_for_storage(self) -> dict:
+        """Every room's log, one comma-separated line per stretch (columns named once)."""
+        return {
+            "format": LOG_FORMAT,
+            "columns": list(LOG_COLUMNS),
+            "rooms": {
+                zone_id: {room_id: [_encode(entry) for entry in room.log] for room_id, room in rooms.items() if room.log}
+                for zone_id, rooms in self.rooms.items()
+                if any(room.log for room in rooms.values())
+            },
+        }
+
+    def restore_log(self, stored: Any, keep: dict[str, Any] | None = None) -> None:
+        """Restore the log. Rooms not in `keep` (zone_id -> room ids), if given, are dropped;
+        unreadable lines are skipped. Columns are matched by name, so a log saved with
+        more or fewer columns still loads."""
+        if not isinstance(stored, dict) or stored.get("format") != LOG_FORMAT:
+            return
+        columns = stored.get("columns")
+        if not isinstance(columns, list):
+            return
+        for zone_id, rooms in (stored.get("rooms") or {}).items():
+            if not isinstance(rooms, dict):
+                continue
+            for room_id, lines in rooms.items():
+                if keep is not None and room_id not in keep.get(zone_id, ()):
+                    continue
+                if not isinstance(lines, list):
+                    continue
+                log = [entry for line in lines if (entry := _decode(columns, line)) is not None]
+                if log:
+                    self._room(zone_id, room_id).log = log[-LOG_SIZE:]
+
+
+def _encode(entry: dict[str, Any]) -> str:
+    values = []
+    for column in LOG_COLUMNS:
+        value = entry.get(column)
+        if value is None:
+            values.append("")
+        elif column in _LOG_BOOL:
+            values.append("1" if value else "0")
+        elif isinstance(value, float) and value.is_integer():
+            values.append(str(int(value)))
+        else:
+            values.append(str(value))
+    return ",".join(values)
+
+
+def _decode(columns: list[str], line: Any) -> dict[str, Any] | None:
+    if not isinstance(line, str):
+        return None
+    values = line.split(",")
+    if len(values) != len(columns):
+        return None
+    entry: dict[str, Any] = dict.fromkeys(LOG_COLUMNS)
+    try:
+        for column, value in zip(columns, values):
+            if column not in entry or value == "":
+                continue
+            if column in _LOG_TEXT:
+                entry[column] = value
+            elif column in _LOG_BOOL:
+                entry[column] = value == "1"
+            elif column in _LOG_INT:
+                entry[column] = int(value)
+            else:
+                entry[column] = float(value)
+    except ValueError:
+        return None
+    if entry["start"] is None or dt_util.parse_datetime(entry["start"]) is None:
+        return None
+    return entry
 
 
 def _minutes(delta: timedelta) -> float:
