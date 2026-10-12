@@ -23,6 +23,15 @@ from .units import climate_attr_celsius, sensor_celsius
 _LOGGER = logging.getLogger(__name__)
 
 
+# After Home Assistant starts (or the integration reloads), sensors from integrations
+# that load slowly (e.g. Zigbee2MQTT, ZHA) have no state for a while. Until they do,
+# within this grace period, a room uses its sensors' last readings from before the
+# restart instead of falling back (e.g. to the zone average), which made graphs spike.
+STARTUP_GRACE = timedelta(minutes=10)
+# Readings from before the restart are only used if they're no older than this
+MAX_RESTORED_AGE = timedelta(hours=24)
+
+
 def state_last_reported(state) -> datetime:
     """Return when an entity last reported, even if its value did not change.
 
@@ -54,6 +63,9 @@ class TemperatureManager:
             fallback_mode = FALLBACK_MODE_ZONE_AVERAGE
         self.fallback_mode = fallback_mode
         self.last_sensor_values: dict[str, dict[str, Any]] = {}  # entity_id -> {value, timestamp}
+        # Readings saved before the last restart, for sensors that haven't loaded yet
+        self.restored_values: dict[str, dict[str, Any]] = {}
+        self.started = dt_util.utcnow()
         self._validator = TemperatureValidator(max_change_per_min=DEFAULT_MAX_TEMP_CHANGE_PER_MIN)
 
     async def get_room_temperature(
@@ -228,7 +240,55 @@ class TemperatureManager:
                     metadata["last_seen"] = last_data["timestamp"].isoformat()
                     return last_data["value"], metadata
 
+        # Just started and the sensors haven't loaded yet: their readings from before
+        if (restored := self._restored_temperature(sensors, current_time)) is not None:
+            metadata["source"] = "restored"
+            return restored, metadata
+
         return await self._fallback_temperature(zone_id, room_config, all_zones, metadata)
+
+    def _restored_temperature(self, sensors: list, current_time: datetime) -> float | None:
+        """During STARTUP_GRACE, a room's readings from before the restart.
+
+        Only for sensors with no state yet (still loading); a sensor that's
+        loaded but stale is genuinely stale. Combined like live readings.
+        """
+        if dt_util.utcnow() - self.started > STARTUP_GRACE:
+            return None
+        values = []
+        for sensor_config in sensors:
+            entity_id = sensor_config if isinstance(sensor_config, str) else (
+                sensor_config.get("temperature") if isinstance(sensor_config, dict) else None
+            )
+            restored = self.restored_values.get(entity_id) if entity_id else None
+            if restored is None:
+                continue
+            state = self.hass.states.get(entity_id)
+            if state is not None and state.state not in ("unknown", "unavailable"):
+                continue
+            if current_time - restored["timestamp"] <= MAX_RESTORED_AGE:
+                values.append(restored["value"])
+        if not values:
+            return None
+        return median(values) if len(values) >= 3 else sum(values) / len(values)
+
+    def values_for_storage(self) -> dict[str, dict[str, Any]]:
+        """Each sensor's last good reading, saved so a restart can bridge the gap."""
+        return {
+            entity_id: {"value": data["value"], "timestamp": data["timestamp"].isoformat()}
+            for entity_id, data in self.last_sensor_values.items()
+        }
+
+    def restore_values(self, stored: Any) -> None:
+        """Load the readings saved before the restart."""
+        for entity_id, data in (stored or {}).items() if isinstance(stored, dict) else ():
+            try:
+                timestamp = dt_util.parse_datetime(data["timestamp"])
+                if timestamp is None:
+                    continue
+                self.restored_values[entity_id] = {"value": float(data["value"]), "timestamp": timestamp}
+            except (KeyError, TypeError, ValueError):
+                continue
 
     def _trv_temperature(self, room_config: dict) -> float | None:
         """Average internal temperature (°C) of the room's available TRVs."""

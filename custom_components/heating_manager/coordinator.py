@@ -914,6 +914,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             self.manual_zone_temp = data.get("manual_zone_temp", {})
             self.manual_room_temp = data.get("manual_room_temp", {})
             self.rooms_off = data.get("rooms_off", {})
+            self.temperature_manager.restore_values(data.get("last_sensor_values"))
             # Rooms deleted since the last save don't keep a boost duration
             zones = self.config.get("zones", {})
             self.boost_durations = {
@@ -962,6 +963,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             "manual_zone_temp": self.manual_zone_temp,
             "manual_room_temp": self.manual_room_temp,
             "rooms_off": self.rooms_off,
+            "last_sensor_values": self.temperature_manager.values_for_storage(),
             "boost_durations": self.boost_durations,
             "room_heating_state": self.heating_logic.get_state_for_storage(),
             "trv_offset_history": self.trv_controller.get_offset_history_for_storage(),
