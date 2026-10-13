@@ -85,7 +85,21 @@ async def test_overheated_room_closes_trv(hass, basic):
     set_temp(hass, SENSOR, 21.0)
     trv.set_internal_temperature(21.0)
     await refresh(coordinator)
-    assert trv.target_temperature == pytest.approx(18.0)
+    # Cooling setpoint 18 °C, but the TRV is already lower (16 °C) and no heat is
+    # flowing: raising it would only open the valve, so it's held
+    assert trv.target_temperature == pytest.approx(16.0)
+    assert not trv.valve_open
+    assert room_data(coordinator)["trv_offset_info"][TRV]["held"] is True
+
+
+async def test_overheated_room_lowers_a_high_trv(hass, basic):
+    coordinator, trv = basic
+    trv._attr_target_temperature = 24.0
+    trv.async_write_ha_state()
+    set_temp(hass, SENSOR, 21.0)
+    trv.set_internal_temperature(21.0)
+    await refresh(coordinator)
+    assert trv.target_temperature == pytest.approx(18.0)       # lowering is always sent
     assert not trv.valve_open
 
 

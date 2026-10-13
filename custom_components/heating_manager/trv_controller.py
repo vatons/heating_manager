@@ -1,9 +1,18 @@
-"""TRV controller with intelligent setpoint calculation using sensor offset."""
-from datetime import datetime
+"""TRV controller with intelligent setpoint calculation using sensor offset.
+
+Commands are only sent when they change something, to spare TRV batteries and the
+Zigbee network: a TRV already at the wanted setpoint isn't sent it again (except
+every RESEND_INTERVAL, in case a command was lost or the TRV was changed by hand).
+While no heat can reach a room (its zone isn't calling and the heat source is off),
+a command that would raise a TRV's setpoint (open its valve) is held back; lowering
+one is always sent.
+"""
+from datetime import datetime, timedelta
 import logging
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DEFAULT_TRV_DEFAULT_OFFSET,
@@ -18,6 +27,11 @@ from .const import (
 from .units import climate_attr_celsius, from_celsius, system_unit, to_celsius
 
 _LOGGER = logging.getLogger(__name__)
+
+# An unchanged setpoint is sent again after this long
+RESEND_INTERVAL = timedelta(minutes=30)
+# Setpoints closer than this (in the TRV's unit) are the same
+SETPOINT_TOLERANCE = 0.05
 
 
 class TRVController:
@@ -72,6 +86,11 @@ class TRVController:
         # 0.0 rather than a positive value: assuming no offset is safer than
         # assuming a fixed 2°C bias that may not apply to the actual TRV hardware.
         self.default_offset = DEFAULT_TRV_DEFAULT_OFFSET
+
+        # trv_id -> when a setpoint was last sent (not saved: sent again after a restart)
+        self._last_sent: dict[str, datetime] = {}
+        # TRVs whose raise is being held back because no heat can reach them
+        self.held: set[str] = set()
 
     def calculate_trv_setpoint(
         self,
@@ -334,6 +353,7 @@ class TRVController:
         needs_heating: bool,
         learn_offset: bool = True,
         radiator_heated: bool | None = None,
+        allow_raise: bool = True,
     ) -> None:
         """Set TRV temperature with intelligent setpoint calculation.
 
@@ -344,6 +364,8 @@ class TRVController:
             target_temp: Desired room temperature (°C)
             room_temp: External room sensor temperature (°C)
             needs_heating: Whether room currently needs heating
+            allow_raise: False while no heat can reach the room: a higher setpoint
+                than the TRV has (or switching it on) is held back
         """
         # Read TRV's internal temperature sensor
         trv_state = self.hass.states.get(trv_id)
@@ -363,6 +385,20 @@ class TRVController:
         command = self._apply_trv_limits(trv_id, trv_state, trv_setpoint)
         trv_setpoint = to_celsius(command, system_unit(self.hass))
 
+        reported = _reported_setpoint(trv_state)
+        is_off = trv_state is not None and trv_state.state == "off"
+        if not allow_raise and (is_off or reported is None or command > reported + SETPOINT_TOLERANCE):
+            if trv_id not in self.held:
+                _LOGGER.debug(
+                    "TRV %s: no heat can reach the room, holding back %.1f (has %s)",
+                    trv_id, command, reported,
+                )
+            self.held.add(trv_id)
+            return
+        self.held.discard(trv_id)
+        if not is_off and self._unchanged(trv_id, reported, command):
+            return
+
         # Send command to TRV
         try:
             # Check if climate domain is available
@@ -374,8 +410,7 @@ class TRVController:
 
             # A TRV that is off ignores setpoints, so switch it back to heat.
             if (
-                trv_state is not None
-                and trv_state.state == "off"
+                is_off
                 and "heat" in (trv_state.attributes.get("hvac_modes") or [])
             ):
                 _LOGGER.warning("TRV %s is off, switching it to heat", trv_id)
@@ -392,6 +427,7 @@ class TRVController:
                 {"entity_id": trv_id, "temperature": command},
                 blocking=True,
             )
+            self._last_sent[trv_id] = dt_util.utcnow()
 
             _LOGGER.info(
                 "Set TRV %s: target=%.1f°C, setpoint=%.1f°C "
@@ -412,7 +448,11 @@ class TRVController:
         Errors are logged rather than raised, so one unreachable TRV cannot
         break the caller. Returns True if the command was delivered.
         """
-        command = self._apply_trv_limits(trv_id, self.hass.states.get(trv_id), setpoint)
+        trv_state = self.hass.states.get(trv_id)
+        command = self._apply_trv_limits(trv_id, trv_state, setpoint)
+        self.held.discard(trv_id)
+        if self._unchanged(trv_id, _reported_setpoint(trv_state), command):
+            return True
         try:
             await self.hass.services.async_call(
                 "climate",
@@ -423,7 +463,15 @@ class TRVController:
         except Exception as err:
             _LOGGER.error("Error setting TRV %s temperature: %s", trv_id, err)
             return False
+        self._last_sent[trv_id] = dt_util.utcnow()
         return True
+
+    def _unchanged(self, trv_id: str, reported: float | None, command: float) -> bool:
+        """The TRV already has this setpoint, and it was sent recently enough."""
+        if reported is None or abs(command - reported) > SETPOINT_TOLERANCE:
+            return False
+        last_sent = self._last_sent.get(trv_id)
+        return last_sent is not None and dt_util.utcnow() - last_sent < RESEND_INTERVAL
 
     def _apply_trv_limits(self, trv_id: str, trv_state: Any, setpoint: float) -> float:
         """Convert a °C setpoint to the TRV's unit, round to its step and clamp to its range.
@@ -462,3 +510,14 @@ class TRVController:
                 trv_id, original, setpoint, step, min_temp, max_temp,
             )
         return setpoint
+
+
+def _reported_setpoint(trv_state: Any) -> float | None:
+    """The setpoint the TRV reports, in its unit (as commands are sent)."""
+    if trv_state is None:
+        return None
+    try:
+        value = trv_state.attributes.get("temperature")
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None

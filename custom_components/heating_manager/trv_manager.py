@@ -31,8 +31,11 @@ class TRVManager:
         needs_heating: bool,
         learn_offset: bool = True,
         radiator_heated: bool | None = None,
+        allow_raise: bool = True,
     ) -> None:
-        """Set the target temperature for all TRVs in a room using intelligent control."""
+        """Set the target temperature for all TRVs in a room using intelligent control.
+
+        allow_raise: False while no heat can reach the room (see TRVController)."""
         if target_temp is None:
             _LOGGER.warning(
                 "Skipping TRV temperature update: target_temp is None for room %s",
@@ -48,6 +51,7 @@ class TRVManager:
                 target_temp, room_temp, needs_heating,
                 learn_offset=learn_offset,
                 radiator_heated=radiator_heated,
+                allow_raise=allow_raise,
             )
 
     async def get_trv_offset_info(
@@ -96,6 +100,8 @@ class TRVManager:
                 "samples_heated": heated.get("samples", 0),
                 "samples_unheated": unheated.get("samples", 0),
                 "trv_setpoint": trv_setpoint,
+                # A raise held back while no heat can reach the room
+                "held": trv_id in self.trv_controller.held,
             }
 
         return trv_data
