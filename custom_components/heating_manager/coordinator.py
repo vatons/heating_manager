@@ -243,6 +243,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     result[zone_id] = zone_data
                     continue
 
+                trv_commands: list[dict[str, Any]] = []
                 for room_id, room_config in rooms.items():
                     if not isinstance(room_config, dict):
                         _LOGGER.error(
@@ -339,19 +340,15 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                         for trv_id in room_config.get("trvs", []):
                             await self.trv_controller.set_trv_setpoint(trv_id, self.minimum_temp)
                     else:
-                        # Set TRV temperatures
-                        await self.trv_manager.set_trv_temperatures(
-                            zone_id, room_id, room_config, target_temp, room_temp, needs_heating,
+                        # TRV setpoints are sent once the zone's demand is known
+                        trv_commands.append(dict(
+                            room_id=room_id, room_config=room_config, target_temp=target_temp,
+                            room_temp=room_temp, needs_heating=needs_heating,
                             # Only learn TRV offsets against the room's own sensors
                             learn_offset=temp_metadata["source"] == "local_sensors",
                             # Heat going in since the last update, for the comparison offsets
                             radiator_heated=self._room_heated.get(zone_id, {}).get(room_id),
-                        )
-
-                    # Collect TRV offset information for display
-                    trv_offset_info = await self.trv_manager.get_trv_offset_info(
-                        self.hass, zone_id, room_id, room_config, room_temp
-                    )
+                        ))
 
                     # Extract sensor entity IDs for backwards compatibility in attributes
                     sensor_entity_ids = self.temperature_manager.get_sensor_entity_ids(room_config)
@@ -368,7 +365,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                         "temperature_source": temp_metadata["source"],
                         "sensors_status": temp_metadata["sensors_status"],
                         "temperature_last_seen": temp_metadata["last_seen"],
-                        "trv_offset_info": trv_offset_info,
+                        "trv_offset_info": {},  # filled in once TRV setpoints are sent
                         "heating_analytics": None,  # filled in once the zone's demand is known
                         "manual_room_override": {
                             "active": (
@@ -403,6 +400,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     )
                 zone_data["heating_demand_mode"] = zone_demand_mode
                 self._update_heat_flow(zone_id, zone_config, zone_data, current_time)
+                await self._send_trv_setpoints(zone_id, zone_data, trv_commands)
                 zone_data["manual_zone_override"] = {
                     "active": zone_id in self.manual_zone_temp,
                     "temperature": self.manual_zone_temp.get(zone_id, {}).get("temperature"),
@@ -651,6 +649,27 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             heated = bool(room_data["needs_heating"]) and heat_flowing
             room_data["heated"] = heated
             self._room_heated.setdefault(zone_id, {})[room_id] = heated
+
+    async def _send_trv_setpoints(self, zone_id: str, zone_data: dict, trv_commands: list[dict]) -> None:
+        """Send the zone's TRV setpoints, then read back what each TRV shows.
+
+        While the zone isn't calling for heat and its heat source is off, no heat can
+        reach its rooms: raising a TRV's setpoint (opening its valve) would only cost
+        battery, so raises are held back. Lowering one is always sent, in case heat
+        arrives that Heating Manager doesn't know about (a boiler shared with another
+        zone). While the zone is calling, setpoints are sent even if the heat source
+        is still off: a boiler automation may wait for the TRVs to ask for heat.
+        """
+        allow_raise = bool(zone_data["heating_demand"] or zone_data.get("heat_flowing"))
+        for command in trv_commands:
+            await self.trv_manager.set_trv_temperatures(
+                zone_id, allow_raise=allow_raise, **command,
+            )
+        rooms = self.config.get("zones", {}).get(zone_id, {}).get(CONF_ROOMS, {})
+        for room_id, room_data in zone_data["rooms"].items():
+            room_data["trv_offset_info"] = await self.trv_manager.get_trv_offset_info(
+                self.hass, zone_id, room_id, rooms.get(room_id, {}), room_data["temperature"]
+            )
 
     def _heat_minutes(self, zone_ids, now) -> float | None:
         """Minutes heat has been flowing in any of these zones (0: none is; None: not known)."""

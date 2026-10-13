@@ -523,6 +523,7 @@ A TRV or sensor used by a room has been missing (renamed, deleted, or its integr
 - Ensure TRV entity IDs in config match actual entities
 - Check TRV is online and responding to Home Assistant
 - Verify the climate integration for your TRVs supports `set_temperature` service
+- A TRV that doesn't move while its room is cold: check `held` in the room entity's `trv_control.trvs` attributes. It's `true` while no heat can reach the room (the zone isn't calling and its heat source is off); the TRV is raised as soon as the zone calls or heat flows
 
 ### Temperature Readings Incorrect
 
@@ -607,6 +608,17 @@ The system intelligently adjusts the boost based on how far the room is from tar
 | At target | Maintain (0.5°C) | Room 20°C → TRV 26°C* |
 
 *Assuming 6°C learned offset. Actual values depend on your TRV and radiator configuration.
+
+#### Commands sent to TRVs
+
+To spare TRV batteries and the Zigbee network, a TRV is only sent a setpoint when it changes something:
+
+- **Unchanged setpoints aren't sent again.** If a TRV already reports the setpoint Heating Manager wants, nothing is sent. It's sent again every 30 minutes anyway, in case a command was lost, and a TRV changed by hand is put back at the next update. After a restart each TRV gets its setpoint once.
+- **No opening a valve while no heat can arrive.** While a zone isn't calling for heat and its heat source is off (e.g. a cold room outvoted in `zone_average` mode), a setpoint that would raise a TRV, or switch it on, is held back: the TRV keeps what it has. It goes out in the same update the zone starts calling or heat starts flowing. The TRV shows `held: true` in the room entity's `trv_control.trvs` attributes meanwhile.
+- **Lowering is always sent**, so heat Heating Manager doesn't know about (a boiler shared with another zone, without a heat source set) can't overheat a room through a TRV left high.
+- **While the zone is calling, setpoints are sent even if the heat source still reads off**, so a boiler automation that waits for TRVs to ask for heat still works.
+
+TRV offsets keep learning throughout: they come from the TRV's reported temperature, not from commands.
 
 #### Self-Learning Behavior (Exponential Moving Average)
 

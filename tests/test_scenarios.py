@@ -568,6 +568,7 @@ async def test_other_rooms_unaffected_by_unavailable_trv(hass, zone):
     trvs["climate.lounge_trv"].set_available(False)
     trvs["climate.study_trv"].set_internal_temperature(17.0)
     trvs["climate.study_trv"]._attr_target_temperature = 7.0
+    trvs["climate.study_trv"].async_write_ha_state()
     await tick()
     assert margin_of(trvs["climate.study_trv"]) >= OPEN_MARGIN
 
@@ -586,7 +587,8 @@ async def settle_at_target(set_room, tick, rooms):
 async def test_zone_average_cold_room_is_outvoted(hass, zone):
     """Documents zone_average: a cold room among warm rooms doesn't fire the boiler.
 
-    Its TRV still opens, so it warms whenever the boiler runs for the zone.
+    While the zone doesn't call, its TRV isn't raised (no heat can arrive), but it keeps
+    its setpoint, which a cold TRV is well below, so it warms whenever the boiler runs.
     Use any_room mode if every room must get heat.
     """
     rooms = {"bedroom": (True, 20.0), "lounge": (True, 20.0), "study": (True, 20.0)}
