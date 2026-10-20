@@ -135,7 +135,9 @@ Each zone has a climate entity with the following features:
   - `boost` - Temporarily boost room temperature above the schedule
   - `skip_to_next` - Go to the next scheduled temperature now (see [Skip to Next](#skip-to-next)); on the whole house, every zone
 
-A room with no override of its own shows its zone's: the zone's `manual` or `skip_to_next` preset, and `manual_override` with `from_zone: true` and the room's actual target. Choosing `schedule` on such a room puts just that room back on the schedule until the next change; the zone and its other rooms keep the zone's override. Choose `schedule` on the zone to end it for every room.
+A room with no override of its own shows its zone's: the zone's `manual` or `skip_to_next` preset, and `manual_override` with `from_zone: true` and the room's actual target.
+
+`manual_override` on rooms and zones also says when the override's temperature ends: `until` (local time, e.g. `"21:00"`), `until_tomorrow` (true when that's tomorrow) and `until_timestamp` (full date and time, for changes further away). For a manual temperature that's the next schedule change; for a skip, the change after the one skipped to (the override itself hands over to the schedule at the change skipped to, so the preset shows `schedule` from then, at the same temperature). All three are empty with no override, or when the schedule never changes. Choosing `schedule` on such a room puts just that room back on the schedule until the next change; the zone and its other rooms keep the zone's override. Choose `schedule` on the zone to end it for every room.
 
 ### Room Boost
 

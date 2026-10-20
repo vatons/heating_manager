@@ -80,6 +80,10 @@ def target(hass, entity_id):
 def attrs(hass, entity_id):
     return hass.states.get(entity_id).attributes
 
+def core(override: dict) -> dict:
+    """An override without its until fields (tested on their own)."""
+    return {key: override[key] for key in ("active", "temperature", "skipped", "from_zone")}
+
 
 async def press(hass, entity_id):
     await hass.services.async_call("button", "press", {"entity_id": entity_id}, blocking=True)
@@ -106,7 +110,7 @@ async def test_room_skips_to_its_next_temperature_with_its_offset(hass, setup):
     assert target(hass, ROOM) == 18.0                     # 19 - 1
     await press(hass, ROOM_SKIP)
     assert target(hass, ROOM) == 16.0                     # 17 - 1, not 17
-    assert attrs(hass, ROOM)["manual_override"] == {"active": True, "temperature": 16.0, "skipped": True, "from_zone": False}
+    assert core(attrs(hass, ROOM)["manual_override"]) == {"active": True, "temperature": 16.0, "skipped": True, "from_zone": False}
     assert attrs(hass, ROOM)["preset_mode"] == "skip_to_next"
     assert target(hass, STUDY) == 19.0                    # other rooms unaffected
 
@@ -303,7 +307,7 @@ async def test_rooms_show_their_zones_skip(hass, setup):
     assert attrs(hass, ZONE)["preset_mode"] == "skip_to_next"
     for entity_id, temperature in ((ROOM, 16.0), (STUDY, 17.0)):
         assert attrs(hass, entity_id)["preset_mode"] == "skip_to_next"
-        assert attrs(hass, entity_id)["manual_override"] == {
+        assert core(attrs(hass, entity_id)["manual_override"]) == {
             "active": True, "temperature": temperature, "skipped": True, "from_zone": True,
         }
 
@@ -313,7 +317,7 @@ async def test_rooms_show_their_zones_manual_temperature(hass, setup):
     await entry.runtime_data.set_manual_zone_temperature("downstairs", 21.0)
     await settle(hass)
     assert attrs(hass, ROOM)["preset_mode"] == "manual"
-    assert attrs(hass, ROOM)["manual_override"] == {
+    assert core(attrs(hass, ROOM)["manual_override"]) == {
         "active": True, "temperature": 20.0, "skipped": False, "from_zone": True,   # 21 - 1
     }
 
@@ -333,7 +337,7 @@ async def test_schedule_on_a_room_puts_only_that_room_back(hass, setup, freezer)
     # This room is back on the schedule...
     assert target(hass, ROOM) == 18.0                     # 19 - 1
     assert attrs(hass, ROOM)["preset_mode"] == "schedule"
-    assert attrs(hass, ROOM)["manual_override"] == {
+    assert core(attrs(hass, ROOM)["manual_override"]) == {
         "active": False, "temperature": None, "skipped": False, "from_zone": False,
     }
     assert entry.runtime_data.is_skipped("downstairs", "lounge") is False
@@ -364,3 +368,57 @@ async def test_zone_schedule_ends_the_zones_skip_for_every_room(hass, setup):
     assert (target(hass, ROOM), target(hass, STUDY)) == (18.0, 19.0)
     for entity_id in (ROOM, STUDY, ZONE):
         assert attrs(hass, entity_id)["preset_mode"] == "schedule"
+
+
+# ---------------------------------------------------------------------------
+# When an override's temperature ends: until
+# ---------------------------------------------------------------------------
+
+def until(override: dict) -> tuple:
+    return override["until"], override["until_tomorrow"], override["until_timestamp"]
+
+
+async def test_manual_temperature_until_the_next_change(hass, setup):
+    entry = await setup()
+    await entry.runtime_data.set_manual_room_temperature("downstairs", "lounge", 21.0)
+    await settle(hass)
+    assert until(attrs(hass, ROOM)["manual_override"]) == ("21:00", False, local_dt(hour=21).isoformat())
+
+
+async def test_skip_until_the_change_after(hass, setup):
+    await setup()
+    await press(hass, ROOM_SKIP)
+    # Skipped to 21:00's 17 °C: it lasts until tomorrow's 06:00
+    assert until(attrs(hass, ROOM)["manual_override"]) == ("06:00", True, local_dt(day=15, hour=6).isoformat())
+
+
+async def test_skip_in_the_evening_until_tomorrow_evening(hass, setup):
+    await setup(hour=22)
+    await press(hass, ROOM_SKIP)
+    # Skipped to tomorrow's 06:00: it lasts until tomorrow's 21:00
+    assert until(attrs(hass, ROOM)["manual_override"]) == ("21:00", True, local_dt(day=15, hour=21).isoformat())
+
+
+async def test_zone_overrides_and_their_rooms(hass, setup):
+    entry = await setup()
+    await entry.runtime_data.set_manual_zone_temperature("downstairs", 21.0)
+    await settle(hass)
+    for entity_id in (ZONE, ROOM, STUDY):
+        assert until(attrs(hass, entity_id)["manual_override"])[:2] == ("21:00", False)
+    await preset(hass, ZONE, "skip_to_next")
+    for entity_id in (ZONE, ROOM, STUDY):
+        assert until(attrs(hass, entity_id)["manual_override"])[:2] == ("06:00", True)
+
+
+async def test_no_until_without_an_override_or_a_change(hass, setup):
+    entry = await setup()
+    assert until(attrs(hass, ROOM)["manual_override"]) == (None, False, None)
+    assert until(attrs(hass, ZONE)["manual_override"]) == (None, False, None)
+    # A schedule that never changes: the override never ends
+    await entry.runtime_data.set_manual_room_temperature("upstairs", "bedroom", 21.0)
+    await settle(hass)
+    assert until(attrs(hass, "climate.upstairs_bedroom")["manual_override"]) == (None, False, None)
+    # A room put back on the schedule while its zone is skipped has no override
+    await preset(hass, ZONE, "skip_to_next")
+    await preset(hass, ROOM, "schedule")
+    assert until(attrs(hass, ROOM)["manual_override"]) == (None, False, None)

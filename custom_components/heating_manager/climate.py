@@ -212,6 +212,10 @@ def _public_override(override: dict | None) -> dict[str, Any]:
         "active": bool(override.get("active")),
         "temperature": override.get("temperature"),
         "skipped": bool(override.get("skipped")),
+        # When its temperature next changes (None if never)
+        "until": override.get("until"),
+        "until_tomorrow": bool(override.get("until_tomorrow")),
+        "until_timestamp": override.get("until_timestamp"),
     }
 
 
@@ -224,12 +228,11 @@ def _room_override(zone_data: dict, room_data: dict) -> dict[str, Any]:
     zone = zone_data.get("manual_zone_override") or {}
     if zone.get("active") and not room_data.get("off") and not room_data.get("boost"):
         return {
-            "active": True,
+            **_public_override(zone),
             "temperature": room_data.get("target_temperature"),
-            "skipped": bool(zone.get("skipped")),
             "from_zone": True,
         }
-    return {"active": False, "temperature": None, "skipped": False, "from_zone": False}
+    return {**_public_override(None), "from_zone": False}
 
 
 async def _async_boost_rooms(
