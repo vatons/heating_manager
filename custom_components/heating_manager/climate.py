@@ -415,6 +415,10 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
                     "warm_up_minutes": analytics.get("warm_up_minutes"),
                     "stretches": analytics.get("heating_stretches", 0),
                     "logged": analytics.get("logged_stretches", 0),
+                    # The radiators' own rate before losses to outside, and the rate it
+                    # gives at today's outdoor temperature (needs heat loss)
+                    "power_per_hour": _round(analytics.get("heating_power")),
+                    "expected_rate_per_hour": _round(analytics.get("expected_heating_rate")),
                 },
                 # Learned from stretches without heat; heat loss needs an outdoor temperature
                 "cooling": {
@@ -441,7 +445,7 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
                     "timestamp": analytics.get("eta_timestamp"),
                     "confidence_percent": round(analytics.get("confidence", 0) * 100),
                     # warming, cooling, or why there's no estimate: still_warming,
-                    # not_cooling, not_before_target_changes
+                    # not_cooling, not_reaching, not_before_target_changes
                     "status": analytics.get("eta_status"),
                     "expected_peak": _round(analytics.get("expected_peak")),
                     "expected_peak_minutes": analytics.get("expected_peak_minutes"),

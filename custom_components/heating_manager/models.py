@@ -44,11 +44,13 @@ class HeatingAnalyticsData:
     eta_timestamp: datetime | None
     confidence: float                   # 0.0-1.0
     logged_stretches: int = 0           # heated stretches in the room's log
+    heating_power: float | None = None  # °C/h the radiators add before losses to outside
+    expected_heating_rate: float | None = None  # °C/h at today's outdoor temperature
     overrun_rise: float | None = None   # °C a room keeps rising after heating stops
     overrun_minutes: int | None = None  # from heating stopping to the peak
     overrun_stretches: int = 0
     current_overrun: bool | None = None  # the current stretch is still in its overrun
-    eta_status: str | None = None       # warming, cooling, still_warming, not_cooling, not_before_target_changes
+    eta_status: str | None = None       # warming, cooling, still_warming, not_cooling, not_reaching, not_before_target_changes
     expected_peak: float | None = None  # still warming: the peak to expect
     expected_peak_minutes: int | None = None
 
@@ -69,6 +71,8 @@ class HeatingAnalyticsData:
             "eta_minutes": self.eta_minutes,
             "eta_timestamp": self.eta_timestamp.isoformat() if self.eta_timestamp else None,
             "confidence": self.confidence,
+            "heating_power": self.heating_power,
+            "expected_heating_rate": self.expected_heating_rate,
             "overrun_rise": self.overrun_rise,
             "overrun_minutes": self.overrun_minutes,
             "overrun_stretches": self.overrun_stretches,

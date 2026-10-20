@@ -16,6 +16,10 @@ showed is folded into the room's long-term figures:
 - heat loss per degree: the cooling rate divided by how much warmer the room is
   than outside, when an outdoor temperature is available. Unlike the cooling
   rate it doesn't change with the weather.
+- heating power: what the radiators alone would add, before the room's losses to
+  outside (heating rate + heat loss x (room - outside)). Unlike the heating rate it
+  doesn't change with the weather, so the warming estimate uses it, less the losses
+  at today's outdoor temperature, once heat loss is known.
 
 Only readings from the room's own sensors are used; fallback temperatures (zone
 average, TRV) are skipped. Learned figures are saved; the stretch in progress
@@ -193,6 +197,8 @@ class _Room:
     cooling_stretches: int = 0
     heat_loss: float | None = None    # °C/h lost per °C warmer than outside
     heat_loss_stretches: int = 0
+    heating_power: float | None = None    # °C/h the radiators add before losses to outside
+    heating_power_stretches: int = 0
     overrun_rise: float | None = None     # °C the room keeps rising after heating stops
     overrun_minutes: float | None = None  # from heating stopping to the peak
     overrun_stretches: int = 0
@@ -207,6 +213,7 @@ class _Room:
         "heating_rate", "warm_up_minutes", "heating_stretches",
         "cooling_rate", "cooling_stretches", "heat_loss", "heat_loss_stretches",
         "overrun_rise", "overrun_minutes", "overrun_stretches",
+        "heating_power", "heating_power_stretches",
     )
 
     def to_dict(self) -> dict[str, Any]:
@@ -412,6 +419,10 @@ class HeatingAnalytics:
                     room.warm_up_minutes = self._learn(room.warm_up_minutes, warm_up)
                 room.heating_rate = self._learn(room.heating_rate, slope)
                 room.heating_stretches += 1
+                power = self._heating_power(room, stretch, slope)
+                if power is not None:
+                    room.heating_power = self._learn(room.heating_power, power)
+                    room.heating_power_stretches += 1
             if len(stretch.readings) >= 2:
                 entry = _log_entry(stretch, warm_up, None if result is None else result[1])
                 room.log.append(entry)
@@ -429,6 +440,31 @@ class HeatingAnalytics:
             if difference >= MIN_INDOOR_OUTDOOR_DIFFERENCE and slope < 0:
                 room.heat_loss = self._learn(room.heat_loss, -slope / difference)
                 room.heat_loss_stretches += 1
+
+    def _heating_power(self, room: _Room, stretch: _Stretch, rate: float) -> float | None:
+        """The radiators' own heating rate in this stretch: the room's rate plus what it
+        lost to outside meanwhile. None without heat loss or the outdoor temperature."""
+        if room.heat_loss is None or room.heat_loss_stretches < self.min_stretches:
+            return None
+        if stretch.n_outdoor == 0 or stretch.n_outdoor < len(stretch.readings) / 2:
+            return None
+        room_mean = sum(temp for _, temp in stretch.readings) / len(stretch.readings)
+        outdoor = stretch.sum_outdoor / stretch.n_outdoor
+        return rate + room.heat_loss * max(0.0, room_mean - outdoor)
+
+    def _expected_heating_rate(
+        self, room: _Room, current: float, target: float, outdoor: float | None,
+    ) -> float | None:
+        """Heating rate to expect today: heating power less the losses at today's outdoor
+        temperature, over the climb from current to target. None if not known."""
+        enough = self.min_stretches
+        if (
+            outdoor is None or room.heating_power is None or room.heating_power_stretches < enough
+            or room.heat_loss is None or room.heat_loss_stretches < enough
+        ):
+            return None
+        middle = (current + target) / 2
+        return room.heating_power - room.heat_loss * max(0.0, middle - outdoor)
 
     def get_log(self, zone_id: str, room_id: str) -> list[dict[str, Any]]:
         """The room's logged heated stretches, oldest first."""
@@ -479,10 +515,20 @@ class HeatingAnalytics:
         if trend_rate is None and stretch is not None:
             trend_rate = heating_rate if stretch.heated else cooling_rate
 
+        # Warming: at today's outdoor temperature when the heating power is known
+        expected_rate = self._expected_heating_rate(room, current_temp, target_temp, outdoor_temp)
         eta_minutes, confidence, eta_status = self._time_to_target(
             room, stretch, current_temp, target_temp, needs_heating, outdoor_temp,
-            heating_rate, warm_up, cooling_rate, heat_loss, rate_so_far,
+            heating_rate if expected_rate is None else expected_rate,
+            warm_up, cooling_rate, heat_loss, rate_so_far,
+            heating_stretches=room.heating_stretches if expected_rate is None else room.heating_power_stretches,
         )
+        if (
+            expected_rate is not None and expected_rate < STABLE_RATE
+            and needs_heating and current_temp < target_temp
+        ):
+            # Losses at today's outdoor temperature outweigh what the radiators add
+            eta_status = "not_reaching"
         if (
             eta_minutes is not None and target_changes_at is not None
             and now + timedelta(minutes=eta_minutes) > dt_util.as_utc(target_changes_at)
@@ -514,6 +560,8 @@ class HeatingAnalytics:
             eta_timestamp=eta_timestamp,
             confidence=confidence,
             logged_stretches=len(room.log),
+            heating_power=room.heating_power if room.heating_power_stretches >= enough else None,
+            expected_heating_rate=expected_rate,
             overrun_rise=room.overrun_rise if overrun_known else None,
             overrun_minutes=None if not overrun_known else round(room.overrun_minutes),
             overrun_stretches=room.overrun_stretches,
@@ -529,6 +577,7 @@ class HeatingAnalytics:
         heating_rate: float | None, warm_up: float | None,
         cooling_rate: float | None, heat_loss: float | None,
         rate_so_far: float | None = None,
+        heating_stretches: int | None = None,
     ) -> tuple[int | None, float, str | None]:
         """(minutes, confidence, status) to reach target: warming if the room wants heat,
         else cooling. Status says why there's no estimate: still_warming (radiators still
@@ -545,7 +594,8 @@ class HeatingAnalytics:
                     elapsed = (stretch.last - stretch.start).total_seconds() / 60
                     remaining_warm_up = max(0.0, remaining_warm_up - elapsed)
             hours = (target - current) / heating_rate
-            return round(remaining_warm_up + hours * 60), self._confidence(room.heating_stretches, hours), "warming"
+            stretches = room.heating_stretches if heating_stretches is None else heating_stretches
+            return round(remaining_warm_up + hours * 60), self._confidence(stretches, hours), "warming"
         if not needs_heating and current > target:
             if stretch is not None and stretch.in_overrun:
                 return None, 0.0, "still_warming"
