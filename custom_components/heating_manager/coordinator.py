@@ -412,6 +412,14 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 zone_data["manual_zone_override"] = self._override_info(
                     None if zone_id in _expired_zone_overrides else self.manual_zone_temp.get(zone_id)
                 )
+                # When each override's temperature ends: the next schedule change, or
+                # for a skip the change after the one skipped to
+                upcoming = self.schedule_manager.upcoming_changes(zone_config, current_time, 2)
+                for info in (
+                    zone_data["manual_zone_override"],
+                    *(room["manual_room_override"] for room in zone_data["rooms"].values()),
+                ):
+                    info.update(self._until(info, upcoming, current_time))
 
                 # Pre-compute schedule period info once per update so
                 # ZoneClimate.extra_state_attributes can read cached data
@@ -1041,6 +1049,25 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             "active": bool(override),
             "temperature": override.get("temperature"),
             "skipped": bool(override.get("skip")),
+        }
+
+    @staticmethod
+    def _until(info: dict, upcoming: list, current_time) -> dict[str, Any]:
+        """until (local HH:MM), until_tomorrow and until_timestamp for an active override:
+        when its temperature next changes. None if it never does."""
+        when = None
+        if info.get("active"):
+            index = 1 if info.get("skipped") else 0
+            if len(upcoming) > index:
+                when = upcoming[index][0]
+        if when is None:
+            return {"until": None, "until_tomorrow": False, "until_timestamp": None}
+        local = dt_util.as_local(when)
+        today = dt_util.as_local(current_time).date()
+        return {
+            "until": local.strftime("%H:%M"),
+            "until_tomorrow": local.date() == today + timedelta(days=1),
+            "until_timestamp": local.isoformat(),
         }
 
     async def follow_schedule(self, zone_id: str, room_id: str) -> None:
