@@ -1,4 +1,4 @@
-"""Shared helpers for the per-room boost entities (sensor, button, number)."""
+"""Shared helpers for the per-room and per-zone entities (sensor, button, number)."""
 from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
@@ -8,10 +8,10 @@ from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .climate import _room_device_info
+from .climate import _room_device_info, _zone_device_info
 from .const import CONF_SENSORS
 from .coordinator import HeatingManagerCoordinator
-from .entry_data import room_unique_id
+from .entry_data import room_unique_id, zone_unique_id
 
 
 @callback
@@ -32,13 +32,16 @@ def async_add_room_entities(
     async_add_entities: AddEntitiesCallback,
     domain: str,
     factories: list[type[HeatingRoomEntity]],
+    zone_factories: list[type[HeatingZoneEntity]] = (),
 ) -> None:
-    """Add one entity of each kind for every room, each under its zone's subentry."""
+    """Add one entity of each kind for every room (and zone), under its zone's subentry."""
     coordinator: HeatingManagerCoordinator = entry.runtime_data
     added: list[tuple[str | None, Entity]] = []
     for zone_id, zone in coordinator.config.get("zones", {}).items():
         if not isinstance(zone, dict):
             continue
+        for factory in zone_factories:
+            added.append((zone.get("subentry_id"), factory(coordinator, zone_id)))
         for room_id in zone.get("rooms", {}):
             for factory in factories:
                 added.append((zone.get("subentry_id"), factory(coordinator, zone_id, room_id)))
@@ -74,3 +77,21 @@ class HeatingRoomEntity(CoordinatorEntity[HeatingManagerCoordinator]):
     def _can_boost(self) -> bool:
         """The integration boosts only rooms with temperature sensors."""
         return bool(self._room_config.get(CONF_SENSORS))
+
+
+class HeatingZoneEntity(CoordinatorEntity[HeatingManagerCoordinator]):
+    """An entity on a zone's device, next to the zone's climate entity."""
+
+    _attr_has_entity_name = True
+    key: str
+
+    def __init__(self, coordinator: HeatingManagerCoordinator, zone_id: str) -> None:
+        super().__init__(coordinator)
+        self._zone_id = zone_id
+        self._attr_translation_key = self.key
+        self._attr_unique_id = f"{zone_unique_id(zone_id)}:{self.key}"
+        self._attr_device_info = _zone_device_info(coordinator, zone_id)
+
+    @property
+    def _zone_data(self) -> dict:
+        return (self.coordinator.data or {}).get(self._zone_id, {})

@@ -120,6 +120,7 @@ ATTR_MODE = "mode"
 # Services
 SERVICE_SET_BOOST = "set_boost"
 SERVICE_CLEAR_BOOST = "clear_boost"
+SERVICE_SKIP_TO_NEXT = "skip_to_next"
 SERVICE_SET_MODE = "set_mode"
 
 # Storage

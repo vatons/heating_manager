@@ -36,6 +36,14 @@ clear_boost:
       integration: heating_manager
       domain: climate
 
+skip_to_next:
+  name: Skip to next
+  description: Go to the next scheduled temperature now, until that change comes, when the schedule carries on. Ends the boost; on a zone, also its rooms' own manual temperatures and boosts. Target the whole house to skip every zone. Not in away mode
+  target:
+    entity:
+      integration: heating_manager
+      domain: climate
+
 set_mode:
   name: Set Mode
   description: Set the heating mode (schedule or away)

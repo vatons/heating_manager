@@ -31,7 +31,8 @@
             "state": {
               "schedule": "mdi:calendar-clock",
               "away": "mdi:home-export-outline",
-              "boost": "mdi:rocket-launch"
+              "boost": "mdi:rocket-launch",
+              "skip_to_next": "mdi:skip-next"
             }
           }
         }
@@ -48,6 +49,9 @@
       },
       "cancel_boost": {
         "default": "mdi:rocket-launch-outline"
+      },
+      "skip_to_next": {
+        "default": "mdi:skip-next"
       }
     },
     "number": {
@@ -65,6 +69,9 @@
     },
     "set_mode": {
       "service": "mdi:home-export-outline"
+    },
+    "skip_to_next": {
+      "service": "mdi:skip-next"
     }
   }
 }

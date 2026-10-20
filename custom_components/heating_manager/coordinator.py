@@ -5,7 +5,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -381,17 +381,11 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                         "temperature_last_seen": temp_metadata["last_seen"],
                         "trv_offset_info": {},  # filled in once TRV setpoints are sent
                         "heating_analytics": None,  # filled in once the zone's demand is known
-                        "manual_room_override": {
-                            "active": (
-                                zone_id in self.manual_room_temp
-                                and room_id in self.manual_room_temp.get(zone_id, {})
-                            ),
-                            "temperature": (
-                                self.manual_room_temp.get(zone_id, {})
-                                .get(room_id, {})
-                                .get("temperature")
-                            ),
-                        },
+                        # An override that ended this update is already shown as ended
+                        "manual_room_override": self._override_info(
+                            None if (zone_id, room_id) in _expired_room_overrides
+                            else self.manual_room_temp.get(zone_id, {}).get(room_id)
+                        ),
                     }
 
                 # Calculate zone heating demand based on configured mode
@@ -415,10 +409,9 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 zone_data["heating_demand_mode"] = zone_demand_mode
                 self._update_heat_flow(zone_id, zone_config, zone_data, current_time)
                 await self._send_trv_setpoints(zone_id, zone_data, trv_commands)
-                zone_data["manual_zone_override"] = {
-                    "active": zone_id in self.manual_zone_temp,
-                    "temperature": self.manual_zone_temp.get(zone_id, {}).get("temperature"),
-                }
+                zone_data["manual_zone_override"] = self._override_info(
+                    None if zone_id in _expired_zone_overrides else self.manual_zone_temp.get(zone_id)
+                )
 
                 # Pre-compute schedule period info once per update so
                 # ZoneClimate.extra_state_attributes can read cached data
@@ -718,23 +711,21 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 self.hass, zone_id, room_id, rooms.get(room_id, {}), room_data["temperature"]
             )
 
-    def _target_changes_at(self, zone_data: dict, room_data: dict, current_time) -> datetime | None:
+    def _target_changes_at(self, zone_id: str, room_id: str, room_data: dict, current_time) -> datetime | None:
         """When the room's target next changes: its boost ends, else the zone's next
-        schedule change (None in away mode, or if nothing changes)."""
+        schedule change, or the one after when skipped to the next already (None in
+        away mode, or if nothing changes)."""
         if self.away_mode:
             return None
         boost = room_data.get("boost")
         if boost and boost.get("end_time"):
             return boost["end_time"]
-        upcoming = (zone_data.get("schedule_info") or {}).get("next_period")
-        if not upcoming:
+        zone_config = self.config.get("zones", {}).get(zone_id)
+        if not isinstance(zone_config, dict):
             return None
-        try:
-            hour, minute = (int(part) for part in upcoming["start"].split(":"))
-            when = dt_util.as_local(current_time).replace(hour=hour, minute=minute, second=0, microsecond=0)
-        except (KeyError, ValueError, AttributeError):
-            return None
-        return when + timedelta(days=1) if upcoming.get("tomorrow") else when
+        upcoming = self.schedule_manager.upcoming_changes(zone_config, dt_util.as_local(current_time), 2)
+        index = 1 if self.is_skipped(zone_id, room_id) else 0
+        return upcoming[index][0] if len(upcoming) > index else None
 
     def _heat_minutes(self, zone_ids, now) -> float | None:
         """Minutes heat has been flowing in any of these zones (0: none is; None: not known)."""
@@ -780,7 +771,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 room_data["heating_analytics"] = self.heating_analytics.get_analytics(
                     zone_id, room_id, room_temp, room_data["target_temperature"], room_data["needs_heating"],
                     outdoor_temp=self.outdoor_temperature, now=current_time,
-                    target_changes_at=self._target_changes_at(zone_data, room_data, current_time),
+                    target_changes_at=self._target_changes_at(zone_id, room_id, room_data, current_time),
                 ).to_dict()
 
     @callback
@@ -989,6 +980,74 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             _LOGGER.info("Manual room temperature cleared for %s/%s", zone_id, room_id)
             await self._save_state()
             await self.async_request_refresh()
+
+    async def skip_to_next(self, zone_id: str, room_id: str | None = None) -> None:
+        """Go to the next scheduled temperature now, for a room or a whole zone.
+
+        It's a manual temperature equal to the next scheduled one: when that change
+        comes, the override ends and the schedule carries on at the same temperature.
+        Ends the boost (a boost would hide it). A zone skip also ends its rooms' own
+        manual temperatures and boosts, so the whole zone moves. Pressing it again
+        while skipped does nothing.
+        """
+        if self.away_mode:
+            raise ServiceValidationError("Away mode is on: turn it off to skip to the next scheduled temperature")
+        zone_config = self.config.get("zones", {}).get(zone_id)
+        if not isinstance(zone_config, dict):
+            raise ServiceValidationError(f"Zone {zone_id} not found")
+        rooms = zone_config.get(CONF_ROOMS, {})
+        if room_id is not None and room_id not in rooms:
+            raise ServiceValidationError(f"Room {room_id} not found in zone {zone_id}")
+
+        now = dt_util.now()
+        upcoming = self.schedule_manager.upcoming_changes(zone_config, now, 1)
+        if not upcoming:
+            raise ServiceValidationError(f"{zone_config.get('name', zone_id)} has no schedule change to skip to")
+        next_temp = upcoming[0][1]
+        scheduled = self.schedule_manager.get_scheduled_temperature(zone_config, now)
+        override = {"temperature": next_temp, "last_scheduled_temp": scheduled, "skip": True}
+
+        if room_id is None:
+            current = self.manual_zone_temp.get(zone_id, {})
+            if current.get("skip") and current.get("last_scheduled_temp") == scheduled:
+                return
+            self.boost_manager.boost_state.pop(zone_id, None)
+            self.manual_room_temp.pop(zone_id, None)
+            self.manual_zone_temp[zone_id] = override
+            _LOGGER.info("Zone %s skipped to its next scheduled temperature, %.1f°C", zone_id, next_temp)
+        else:
+            current = self.manual_room_temp.get(zone_id, {}).get(room_id, {})
+            if current.get("skip") and current.get("last_scheduled_temp") == scheduled:
+                return
+            self.boost_manager.boost_state.get(zone_id, {}).pop(room_id, None)
+            # A room's own manual temperature is used as set: include its offset here
+            override["temperature"] = self._apply_room_offset(zone_id, room_id, rooms[room_id], next_temp)
+            self.manual_room_temp.setdefault(zone_id, {})[room_id] = override
+            _LOGGER.info(
+                "Room %s/%s skipped to its next scheduled temperature, %.1f°C",
+                zone_id, room_id, override["temperature"],
+            )
+        await self._save_state()
+        await self.async_request_refresh()
+
+    @staticmethod
+    def _override_info(override: dict | None) -> dict[str, Any]:
+        """A manual override for the entities' attributes."""
+        override = override or {}
+        return {
+            "active": bool(override),
+            "temperature": override.get("temperature"),
+            "skipped": bool(override.get("skip")),
+        }
+
+    def is_skipped(self, zone_id: str, room_id: str | None = None) -> bool:
+        """Skipped to the next scheduled temperature: the room's own override, else
+        (or for a zone) the zone's."""
+        if room_id is not None:
+            room_override = self.manual_room_temp.get(zone_id, {}).get(room_id)
+            if room_override is not None:
+                return bool(room_override.get("skip"))
+        return bool(self.manual_zone_temp.get(zone_id, {}).get("skip"))
 
     async def set_manual_zone_temperature(
         self, zone_id: str, temperature: float

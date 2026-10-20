@@ -133,6 +133,7 @@ Each zone has a climate entity with the following features:
   - `manual` - Shown while a temperature set on the room or zone overrides the schedule. Choose `schedule` to clear it; choosing `manual` holds the current target until the schedule changes (rooms and zones only; on a zone it holds the zone's schedule temperature, and each room keeps its offset)
   - `away` - Frost protection mode
   - `boost` - Temporarily boost room temperature above the schedule
+  - `skip_to_next` (whole house only) - Every zone goes to its next scheduled temperature now (see [Skip to Next](#skip-to-next))
 
 ### Room Boost
 
@@ -183,6 +184,30 @@ target:
 ```
 
 **Check boost status:** besides the sensor, the room climate entity's attributes have `boost.temperature`, `boost.end_time` and `boost.time_remaining_minutes`.
+
+### Skip to Next
+
+Go to the next scheduled temperature now, instead of waiting for it: e.g. at 18:00, with 17 °C scheduled from 21:00, the room drops to 17 °C straight away. When 21:00 comes the schedule carries on at 17 °C, with no step.
+
+| Where | How |
+|---|---|
+| A room | `button.<zone>_<room>_skip_to_next`, or `heating_manager.skip_to_next` on its climate entity |
+| A zone | `button.<zone>_skip_to_next`, or `heating_manager.skip_to_next` on the zone's climate entity |
+| The whole house | The **Skip to next** preset on `climate.heating_manager`, or `heating_manager.skip_to_next` on it: every zone with a change to skip to |
+
+```yaml
+action: heating_manager.skip_to_next
+target:
+  entity_id: climate.downstairs
+```
+
+- It's a manual temperature equal to the next scheduled one, so the room or zone shows the `manual` preset meanwhile, with `manual_override.skipped: true`. Choose **Schedule** to undo it.
+- A room's temperature offset is included: a room with −1 °C skips to 16 °C, not 17 °C.
+- It ends the boost (a boost would hide it). Skipping a zone also ends its rooms' own manual temperatures and boosts, so the whole zone moves.
+- If the next change is tomorrow (skipping after the evening change), it lasts until tomorrow's first change.
+- Pressing it again while skipped does nothing.
+- Not in away mode, and not for a zone whose schedule never changes: the buttons are unavailable then.
+- Editing the zone's schedule so the temperature in force now changes ends it.
 
 ### Heating Mode
 

@@ -310,7 +310,7 @@ def test_icons_and_translations_cover_the_same_keys():
     for key, presets in (
         ("room", {"schedule", "manual", "away", "boost"}),
         ("zone", {"schedule", "manual", "away", "boost"}),
-        ("global", {"schedule", "away", "boost"}),
+        ("global", {"schedule", "away", "boost", "skip_to_next"}),
     ):
         preset_icons = icons["climate"][key]["state_attributes"]["preset_mode"]["state"]
         preset_names = names["climate"][key]["state_attributes"]["preset_mode"]["state"]
@@ -321,7 +321,7 @@ def test_icons_and_translations_cover_the_same_keys():
 def test_every_described_service_has_an_icon():
     services = yaml.safe_load((INTEGRATION / "services.yaml").read_text())
     icons = json.loads((INTEGRATION / "icons.json").read_text())["services"]
-    registered = {"set_boost", "clear_boost", "set_mode"}
+    registered = {"set_boost", "clear_boost", "set_mode", "skip_to_next"}
     assert set(icons) == registered
     assert registered <= set(services)
 
