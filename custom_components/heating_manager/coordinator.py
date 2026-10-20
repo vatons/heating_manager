@@ -671,6 +671,24 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 self.hass, zone_id, room_id, rooms.get(room_id, {}), room_data["temperature"]
             )
 
+    def _target_changes_at(self, zone_data: dict, room_data: dict, current_time) -> datetime | None:
+        """When the room's target next changes: its boost ends, else the zone's next
+        schedule change (None in away mode, or if nothing changes)."""
+        if self.away_mode:
+            return None
+        boost = room_data.get("boost")
+        if boost and boost.get("end_time"):
+            return boost["end_time"]
+        upcoming = (zone_data.get("schedule_info") or {}).get("next_period")
+        if not upcoming:
+            return None
+        try:
+            hour, minute = (int(part) for part in upcoming["start"].split(":"))
+            when = dt_util.as_local(current_time).replace(hour=hour, minute=minute, second=0, microsecond=0)
+        except (KeyError, ValueError, AttributeError):
+            return None
+        return when + timedelta(days=1) if upcoming.get("tomorrow") else when
+
     def _heat_minutes(self, zone_ids, now) -> float | None:
         """Minutes heat has been flowing in any of these zones (0: none is; None: not known)."""
         flowing = [self._heat_flow_since[zone_id] for zone_id in zone_ids if zone_id in self._heat_flow_since]
@@ -715,6 +733,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 room_data["heating_analytics"] = self.heating_analytics.get_analytics(
                     zone_id, room_id, room_temp, room_data["target_temperature"], room_data["needs_heating"],
                     outdoor_temp=self.outdoor_temperature, now=current_time,
+                    target_changes_at=self._target_changes_at(zone_data, room_data, current_time),
                 ).to_dict()
 
     @callback

@@ -44,6 +44,13 @@ class HeatingAnalyticsData:
     eta_timestamp: datetime | None
     confidence: float                   # 0.0-1.0
     logged_stretches: int = 0           # heated stretches in the room's log
+    overrun_rise: float | None = None   # °C a room keeps rising after heating stops
+    overrun_minutes: int | None = None  # from heating stopping to the peak
+    overrun_stretches: int = 0
+    current_overrun: bool | None = None  # the current stretch is still in its overrun
+    eta_status: str | None = None       # warming, cooling, still_warming, not_cooling, not_before_target_changes
+    expected_peak: float | None = None  # still warming: the peak to expect
+    expected_peak_minutes: int | None = None
 
     def to_dict(self) -> dict:
         """Convert to a dictionary for the room's data."""
@@ -62,4 +69,11 @@ class HeatingAnalyticsData:
             "eta_minutes": self.eta_minutes,
             "eta_timestamp": self.eta_timestamp.isoformat() if self.eta_timestamp else None,
             "confidence": self.confidence,
+            "overrun_rise": self.overrun_rise,
+            "overrun_minutes": self.overrun_minutes,
+            "overrun_stretches": self.overrun_stretches,
+            "current_overrun": self.current_overrun,
+            "eta_status": self.eta_status,
+            "expected_peak": self.expected_peak,
+            "expected_peak_minutes": self.expected_peak_minutes,
         }

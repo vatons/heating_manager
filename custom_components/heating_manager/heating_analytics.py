@@ -9,8 +9,10 @@ showed is folded into the room's long-term figures:
 - heating rate: how fast it warms after that, fitted as a straight line through
   every reading, so a sensor that reports in 0.1 °C steps still gives the right
   answer;
-- cooling rate: how fast it cools without heat, ignoring the first minutes after
-  heating stops (radiators are still warm);
+- overrun: after heating stops, radiators (and what they warmed) keep heating the
+  room for a while; how far it keeps rising and how long until it peaks;
+- cooling rate: how fast it cools without heat, from the peak after heating (or
+  straight away when it wasn't just heated);
 - heat loss per degree: the cooling rate divided by how much warmer the room is
   than outside, when an outdoor temperature is available. Unlike the cooling
   rate it doesn't change with the weather.
@@ -50,8 +52,13 @@ RISE_THRESHOLD = 0.1
 MIN_HEATED_STRETCH = timedelta(minutes=15)
 # The warming part of a heated stretch must be at least this long for a heating rate
 MIN_RISE_SPAN = timedelta(minutes=10)
-# After heating stops, radiators still give heat for a while: not used for cooling
+# After heating stops, radiators still give heat for a while (the overrun). It is over,
+# and cooling is learned from the peak on, once the room has fallen RISE_THRESHOLD below
+# its peak or gone OVERRUN_FLAT without a new high, and never sooner than COOL_SETTLE
+# (a sensor can lag) or later than MAX_OVERRUN
 COOL_SETTLE = timedelta(minutes=15)
+OVERRUN_FLAT = timedelta(minutes=30)
+MAX_OVERRUN = timedelta(hours=2)
 # The cooling part of a stretch must be at least this long for a cooling rate
 MIN_COOLING_SPAN = timedelta(minutes=30)
 # A long stretch is learned from in parts this long, so a room that's never heated still learns
@@ -60,6 +67,10 @@ MAX_STRETCH_SPAN = timedelta(hours=3)
 MIN_INDOOR_OUTDOOR_DIFFERENCE = 3.0
 # The rate of the stretch in progress is shown once it covers this long
 MIN_LIVE_SPAN = timedelta(minutes=5)
+# A rate within this (°C/h) of zero is steady
+STABLE_RATE = 0.05
+# The rate during the overrun is shown from the readings this recent
+OVERRUN_RATE_WINDOW = timedelta(minutes=20)
 # Heated stretches kept in each room's log (a few weeks of heating)
 LOG_SIZE = 200
 LOG_FORMAT = 1
@@ -69,6 +80,7 @@ LOG_COLUMNS = (
     "start", "minutes", "continued", "start_temp", "end_temp", "target", "climb_needed",
     "outdoor", "warm_up_minutes", "rate", "zone_heat_minutes", "house_heat_minutes",
     "trvs_heating", "trvs_heating_mean", "minutes_since_heated",
+    "overrun_rise", "overrun_minutes",
 )
 _LOG_TEXT = {"start"}
 _LOG_BOOL = {"continued"}
@@ -144,6 +156,7 @@ class _Stretch:
     start: datetime
     start_temperature: float
     after_heat: bool                  # not heated, straight after heating: let radiators cool first
+    follows_heat: bool = False        # after_heat, and the heated stretch just before is known
     continued: bool = False           # carries on a longer stretch: no warm-up to learn
     last: datetime | None = None
     last_temperature: float | None = None
@@ -157,6 +170,16 @@ class _Stretch:
     n_outdoor: int = 0
     sum_trvs: float = 0.0
     n_trvs: int = 0
+    # Not heated, after heat: the overrun until it settles (then cooling is fitted)
+    settled: bool = False
+    peak: float | None = None
+    peak_first: datetime | None = None  # first reading at the peak
+    peak_last: datetime | None = None   # latest reading at the peak
+    overrun_readings: list[tuple[datetime, float, float | None]] = field(default_factory=list)
+
+    @property
+    def in_overrun(self) -> bool:
+        return not self.heated and self.after_heat and not self.settled
 
 
 @dataclass
@@ -170,14 +193,20 @@ class _Room:
     cooling_stretches: int = 0
     heat_loss: float | None = None    # °C/h lost per °C warmer than outside
     heat_loss_stretches: int = 0
+    overrun_rise: float | None = None     # °C the room keeps rising after heating stops
+    overrun_minutes: float | None = None  # from heating stopping to the peak
+    overrun_stretches: int = 0
     last_heated: bool | None = None   # state of the previous stretch
     last_heated_at: datetime | None = None  # end of the last heated stretch
     log: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    # The last heated stretch's log entry, until the overrun after it is known
+    awaiting_overrun: dict[str, Any] | None = field(default=None, repr=False)
     stretch: _Stretch | None = field(default=None, repr=False)
 
     LEARNED = (
         "heating_rate", "warm_up_minutes", "heating_stretches",
         "cooling_rate", "cooling_stretches", "heat_loss", "heat_loss_stretches",
+        "overrun_rise", "overrun_minutes", "overrun_stretches",
     )
 
     def to_dict(self) -> dict[str, Any]:
@@ -270,7 +299,7 @@ class HeatingAnalytics:
             stretch = self._start(room, heated, timestamp, temp, continued=True, context=context)
         if stretch is None:
             stretch = self._start(room, heated, timestamp, temp, context=context)
-        self._add(stretch, timestamp, temp, outdoor_temp, context)
+        self._add(room, stretch, timestamp, temp, outdoor_temp, context)
 
     def _start(
         self, room: _Room, heated: bool, timestamp: datetime, temp: float,
@@ -281,7 +310,12 @@ class HeatingAnalytics:
         stretch = _Stretch(
             heated=heated, start=timestamp, start_temperature=temp,
             after_heat=after_heat, continued=continued,
+            # The overrun is only learned straight after a heated stretch that was seen to end
+            follows_heat=after_heat and room.last_heated is True and room.last_heated_at is not None
+            and timestamp - room.last_heated_at <= MAX_SAMPLE_GAP,
         )
+        if not stretch.follows_heat:
+            room.awaiting_overrun = None
         if heated:
             since = None if room.last_heated_at is None else _minutes(timestamp - room.last_heated_at)
             stretch.context = {**(context or {}), "minutes_since_heated": 0 if continued else since}
@@ -290,10 +324,9 @@ class HeatingAnalytics:
         room.stretch = stretch
         return stretch
 
-    @staticmethod
     def _add(
-        stretch: _Stretch, timestamp: datetime, temp: float, outdoor: float | None,
-        context: dict[str, Any] | None = None,
+        self, room: _Room, stretch: _Stretch, timestamp: datetime, temp: float,
+        outdoor: float | None, context: dict[str, Any] | None = None,
     ) -> None:
         if stretch.heated:
             if outdoor is not None:
@@ -311,13 +344,52 @@ class HeatingAnalytics:
                     stretch.fit.add(stretch.last, stretch.last_temperature, outdoor)
             if stretch.fit is not None:
                 stretch.fit.add(timestamp, temp, outdoor)
+        elif stretch.in_overrun:
+            self._add_overrun(room, stretch, timestamp, temp, outdoor)
         else:
-            if stretch.fit is None and (not stretch.after_heat or timestamp - stretch.start >= COOL_SETTLE):
+            if stretch.fit is None:
                 stretch.fit = _LineFit(origin=stretch.start)
-            if stretch.fit is not None:
-                stretch.fit.add(timestamp, temp, outdoor)
+            stretch.fit.add(timestamp, temp, outdoor)
         stretch.last = timestamp
         stretch.last_temperature = temp
+
+    def _add_overrun(
+        self, room: _Room, stretch: _Stretch, timestamp: datetime, temp: float, outdoor: float | None,
+    ) -> None:
+        """A reading while the room may still be warming from radiators after heating."""
+        stretch.overrun_readings.append((timestamp, temp, outdoor))
+        if stretch.peak is None or temp > stretch.peak + 1e-9:
+            stretch.peak, stretch.peak_first, stretch.peak_last = temp, timestamp, timestamp
+        elif temp >= stretch.peak - 1e-9:
+            stretch.peak_last = timestamp
+        elapsed = timestamp - stretch.start
+        if elapsed < COOL_SETTLE:
+            return
+        if not (
+            temp <= stretch.peak - RISE_THRESHOLD + 1e-9
+            or timestamp - stretch.peak_first >= OVERRUN_FLAT
+            or elapsed >= MAX_OVERRUN
+        ):
+            return
+        # Over: cooling is fitted from the last reading at the peak on
+        stretch.settled = True
+        stretch.fit = _LineFit(origin=stretch.start)
+        for when, value, out in stretch.overrun_readings:
+            if when >= stretch.peak_last:
+                stretch.fit.add(when, value, out)
+        stretch.overrun_readings = []
+        if not stretch.follows_heat:
+            return
+        rise = max(0.0, stretch.peak - stretch.start_temperature)
+        minutes = (stretch.peak_first - stretch.start).total_seconds() / 60
+        room.overrun_rise = self._learn(room.overrun_rise, rise)
+        room.overrun_minutes = self._learn(room.overrun_minutes, minutes)
+        room.overrun_stretches += 1
+        if room.awaiting_overrun is not None:
+            room.awaiting_overrun["overrun_rise"] = _round(rise)
+            room.awaiting_overrun["overrun_minutes"] = _round(minutes, 1)
+            room.awaiting_overrun = None
+            self.log_version += 1
 
     def _end_stretch(self, room: _Room, learn: bool) -> None:
         stretch = room.stretch
@@ -341,8 +413,10 @@ class HeatingAnalytics:
                 room.heating_rate = self._learn(room.heating_rate, slope)
                 room.heating_stretches += 1
             if len(stretch.readings) >= 2:
-                room.log.append(_log_entry(stretch, warm_up, None if result is None else result[1]))
+                entry = _log_entry(stretch, warm_up, None if result is None else result[1])
+                room.log.append(entry)
                 del room.log[:-LOG_SIZE]
+                room.awaiting_overrun = entry
                 self.log_version += 1
             return
         if fit is None or fit.span < MIN_COOLING_SPAN or (slope := fit.slope()) is None:
@@ -376,8 +450,13 @@ class HeatingAnalytics:
         needs_heating: bool,
         outdoor_temp: float | None = None,
         now: datetime | None = None,
+        target_changes_at: datetime | None = None,
     ) -> HeatingAnalyticsData:
-        """What's learned for a room, the stretch in progress, and time to reach target."""
+        """What's learned for a room, the stretch in progress, and time to reach target.
+
+        target_changes_at: when the room's target next changes (schedule, end of a
+        boost); an estimate beyond it isn't given.
+        """
         now = dt_util.utcnow() if now is None else dt_util.as_utc(now)
         room = self._room(zone_id, room_id)
         enough = self.min_stretches
@@ -385,6 +464,7 @@ class HeatingAnalytics:
         cooling_rate = room.cooling_rate if room.cooling_stretches >= enough else None
         heat_loss = room.heat_loss if room.heat_loss_stretches >= enough else None
         warm_up = room.warm_up_minutes if room.heating_stretches >= enough else None
+        overrun_known = room.overrun_stretches >= enough
 
         stretch = room.stretch
         state = None if stretch is None else ("heated" if stretch.heated else "not_heated")
@@ -392,18 +472,33 @@ class HeatingAnalytics:
         rate_so_far = None
         if stretch is not None and stretch.fit is not None and stretch.fit.n >= 3 and stretch.fit.span >= MIN_LIVE_SPAN:
             rate_so_far = stretch.fit.slope()
+        elif stretch is not None and stretch.in_overrun:
+            rate_so_far = _recent_slope(stretch.overrun_readings)
 
         trend_rate = rate_so_far
         if trend_rate is None and stretch is not None:
             trend_rate = heating_rate if stretch.heated else cooling_rate
 
-        eta_minutes, confidence = self._time_to_target(
+        eta_minutes, confidence, eta_status = self._time_to_target(
             room, stretch, current_temp, target_temp, needs_heating, outdoor_temp,
-            heating_rate, warm_up, cooling_rate, heat_loss,
+            heating_rate, warm_up, cooling_rate, heat_loss, rate_so_far,
         )
+        if (
+            eta_minutes is not None and target_changes_at is not None
+            and now + timedelta(minutes=eta_minutes) > dt_util.as_utc(target_changes_at)
+        ):
+            # Not before the target changes: an estimate for this target means nothing
+            eta_minutes, confidence, eta_status = None, 0.0, "not_before_target_changes"
         eta_timestamp = (
             dt_util.as_local(now + timedelta(minutes=eta_minutes)) if eta_minutes is not None else None
         )
+
+        # While still warming after heating: the peak to expect
+        expected_peak = expected_peak_minutes = None
+        if stretch is not None and stretch.in_overrun and overrun_known and stretch.peak is not None:
+            expected_peak = max(stretch.peak, stretch.start_temperature + room.overrun_rise)
+            elapsed = (now - stretch.start).total_seconds() / 60
+            expected_peak_minutes = max(0, round(room.overrun_minutes - elapsed))
         return HeatingAnalyticsData(
             heating_rate=heating_rate,
             warm_up_minutes=None if warm_up is None else round(warm_up),
@@ -419,6 +514,13 @@ class HeatingAnalytics:
             eta_timestamp=eta_timestamp,
             confidence=confidence,
             logged_stretches=len(room.log),
+            overrun_rise=room.overrun_rise if overrun_known else None,
+            overrun_minutes=None if not overrun_known else round(room.overrun_minutes),
+            overrun_stretches=room.overrun_stretches,
+            current_overrun=None if stretch is None else stretch.in_overrun,
+            eta_status=eta_status,
+            expected_peak=expected_peak,
+            expected_peak_minutes=expected_peak_minutes,
         )
 
     def _time_to_target(
@@ -426,11 +528,14 @@ class HeatingAnalytics:
         needs_heating: bool, outdoor: float | None,
         heating_rate: float | None, warm_up: float | None,
         cooling_rate: float | None, heat_loss: float | None,
-    ) -> tuple[int | None, float]:
-        """(minutes, confidence) to reach target: warming if the room wants heat, else cooling."""
+        rate_so_far: float | None = None,
+    ) -> tuple[int | None, float, str | None]:
+        """(minutes, confidence, status) to reach target: warming if the room wants heat,
+        else cooling. Status says why there's no estimate: still_warming (radiators still
+        giving heat after heating), not_cooling (warming from something else)."""
         if needs_heating and current < target:
             if heating_rate is None or heating_rate < 0.05:
-                return None, 0.0
+                return None, 0.0, None
             # Warm-up still to come: all of it unless this heated stretch has started warming
             remaining_warm_up = warm_up or 0.0
             if stretch is not None and stretch.heated:
@@ -440,16 +545,20 @@ class HeatingAnalytics:
                     elapsed = (stretch.last - stretch.start).total_seconds() / 60
                     remaining_warm_up = max(0.0, remaining_warm_up - elapsed)
             hours = (target - current) / heating_rate
-            return round(remaining_warm_up + hours * 60), self._confidence(room.heating_stretches, hours)
+            return round(remaining_warm_up + hours * 60), self._confidence(room.heating_stretches, hours), "warming"
         if not needs_heating and current > target:
+            if stretch is not None and stretch.in_overrun:
+                return None, 0.0, "still_warming"
+            if rate_so_far is not None and rate_so_far > STABLE_RATE:
+                return None, 0.0, "not_cooling"
             if heat_loss is not None and outdoor is not None and target - outdoor > 0.5:
                 # Cooling slows as the room nears the outside temperature
                 hours = math.log((current - outdoor) / (target - outdoor)) / heat_loss
-                return round(hours * 60), self._confidence(room.heat_loss_stretches, hours)
+                return round(hours * 60), self._confidence(room.heat_loss_stretches, hours), "cooling"
             if cooling_rate is not None and cooling_rate < -0.05:
                 hours = (current - target) / -cooling_rate
-                return round(hours * 60), self._confidence(room.cooling_stretches, hours)
-        return None, 0.0
+                return round(hours * 60), self._confidence(room.cooling_stretches, hours), "cooling"
+        return None, 0.0, None
 
     def _confidence(self, stretches: int, hours: float) -> float:
         confidence = min(0.9, 0.5 + 0.1 * (stretches - self.min_stretches))
@@ -558,6 +667,20 @@ def _decode(columns: list[str], line: Any) -> dict[str, Any] | None:
     return entry
 
 
+def _recent_slope(readings: list[tuple[datetime, float, float | None]]) -> float | None:
+    """°C/h over the last OVERRUN_RATE_WINDOW of readings (None if too few)."""
+    if not readings:
+        return None
+    since = readings[-1][0] - OVERRUN_RATE_WINDOW
+    fit = _LineFit(origin=readings[0][0])
+    for when, value, _ in readings:
+        if when >= since:
+            fit.add(when, value, None)
+    if fit.n < 3 or fit.span < MIN_LIVE_SPAN:
+        return None
+    return fit.slope()
+
+
 def _minutes(delta: timedelta) -> float:
     return round(delta.total_seconds() / 60, 1)
 
@@ -590,6 +713,9 @@ def _log_entry(stretch: _Stretch, warm_up: float | None, rate: float | None) -> 
         "trvs_heating_mean": _round(stretch.sum_trvs / stretch.n_trvs, 1) if stretch.n_trvs else None,
         # Radiator still warm? Minutes since this room's last heated stretch ended
         "minutes_since_heated": context.get("minutes_since_heated"),
+        # Filled in once the overrun after this stretch is known
+        "overrun_rise": None,
+        "overrun_minutes": None,
     }
 
 

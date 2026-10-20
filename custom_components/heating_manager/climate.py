@@ -422,16 +422,29 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
                     "heat_loss_per_degree": _round(analytics.get("heat_loss_per_degree"), 3),
                     "stretches": analytics.get("cooling_stretches", 0),
                 },
+                # After heating stops: how far the room keeps rising, and how long until it peaks
+                "overrun": {
+                    "rise": _round(analytics.get("overrun_rise")),
+                    "minutes": analytics.get("overrun_minutes"),
+                    "stretches": analytics.get("overrun_stretches", 0),
+                },
                 "current": {
                     "state": analytics.get("current_state"),
                     "minutes": analytics.get("current_minutes"),
                     "rate_per_hour": _round(analytics.get("rate_so_far")),
                     "trend": analytics.get("trend"),
+                    # Still warming from radiators after heating stopped
+                    "overrun": analytics.get("current_overrun"),
                 },
                 "estimated_time_to_target": {
                     "minutes": analytics.get("eta_minutes"),
                     "timestamp": analytics.get("eta_timestamp"),
                     "confidence_percent": round(analytics.get("confidence", 0) * 100),
+                    # warming, cooling, or why there's no estimate: still_warming,
+                    # not_cooling, not_before_target_changes
+                    "status": analytics.get("eta_status"),
+                    "expected_peak": _round(analytics.get("expected_peak")),
+                    "expected_peak_minutes": analytics.get("expected_peak_minutes"),
                 },
             }
 
