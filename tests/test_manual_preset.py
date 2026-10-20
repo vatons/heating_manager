@@ -29,8 +29,8 @@ def attrs(hass: HomeAssistant, entity_id: str) -> dict:
 
 
 async def test_preset_lists(hass: HomeAssistant, entry):
-    assert attrs(hass, LOUNGE_CLIMATE)["preset_modes"] == ["schedule", "manual", "away", "boost"]
-    assert attrs(hass, ZONE)["preset_modes"] == ["schedule", "manual", "away", "boost"]
+    assert attrs(hass, LOUNGE_CLIMATE)["preset_modes"] == ["schedule", "manual", "away", "boost", "skip_to_next"]
+    assert attrs(hass, ZONE)["preset_modes"] == ["schedule", "manual", "away", "boost", "skip_to_next"]
     # The whole house has no manual temperature of its own
     assert attrs(hass, GLOBAL)["preset_modes"] == ["schedule", "away", "boost", "skip_to_next"]
 
@@ -39,7 +39,7 @@ async def test_manual_temperature_is_reported_as_manual(hass: HomeAssistant, ent
     assert attrs(hass, LOUNGE_CLIMATE)["preset_mode"] == "schedule"
     await call(hass, "set_temperature", {"entity_id": LOUNGE_CLIMATE, "temperature": 21})
     assert attrs(hass, LOUNGE_CLIMATE)["preset_mode"] == "manual"
-    assert attrs(hass, LOUNGE_CLIMATE)["manual_override"] == {"active": True, "temperature": 21, "skipped": False}
+    assert attrs(hass, LOUNGE_CLIMATE)["manual_override"] == {"active": True, "temperature": 21, "skipped": False, "from_zone": False}
 
 
 async def test_choosing_schedule_clears_a_manual_temperature(hass: HomeAssistant, entry):
@@ -60,14 +60,14 @@ async def test_choosing_manual_holds_the_current_target(hass: HomeAssistant, ent
     await call(hass, "set_preset_mode", {"entity_id": LOUNGE_CLIMATE, "preset_mode": "manual"})
     room = attrs(hass, LOUNGE_CLIMATE)
     assert room["preset_mode"] == "manual"
-    assert room["manual_override"] == {"active": True, "temperature": 19, "skipped": False}
+    assert room["manual_override"] == {"active": True, "temperature": 19, "skipped": False, "from_zone": False}
     assert room["temperature"] == 19
 
 
 async def test_choosing_manual_again_changes_nothing(hass: HomeAssistant, entry):
     await call(hass, "set_temperature", {"entity_id": LOUNGE_CLIMATE, "temperature": 21})
     await call(hass, "set_preset_mode", {"entity_id": LOUNGE_CLIMATE, "preset_mode": "manual"})
-    assert attrs(hass, LOUNGE_CLIMATE)["manual_override"] == {"active": True, "temperature": 21, "skipped": False}
+    assert attrs(hass, LOUNGE_CLIMATE)["manual_override"] == {"active": True, "temperature": 21, "skipped": False, "from_zone": False}
 
 
 async def test_choosing_manual_while_boosted_keeps_the_temperature_and_ends_the_boost(hass: HomeAssistant, entry):
@@ -77,7 +77,7 @@ async def test_choosing_manual_while_boosted_keeps_the_temperature_and_ends_the_
     room = attrs(hass, LOUNGE_CLIMATE)
     assert room["preset_mode"] == "manual"
     assert room["boost"]["temperature"] is None
-    assert room["manual_override"] == {"active": True, "temperature": 22, "skipped": False}
+    assert room["manual_override"] == {"active": True, "temperature": 22, "skipped": False, "from_zone": False}
     assert boost_end(hass) is None
 
 

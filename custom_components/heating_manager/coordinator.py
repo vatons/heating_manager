@@ -1032,13 +1032,38 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
 
     @staticmethod
     def _override_info(override: dict | None) -> dict[str, Any]:
-        """A manual override for the entities' attributes."""
+        """A manual override for the entities' attributes. A room following the schedule
+        while its zone has an override (see follow_schedule) shows no override."""
         override = override or {}
+        if override.get("follow_schedule"):
+            return {"active": False, "temperature": None, "skipped": False, "follows_schedule": True}
         return {
             "active": bool(override),
             "temperature": override.get("temperature"),
             "skipped": bool(override.get("skip")),
         }
+
+    async def follow_schedule(self, zone_id: str, room_id: str) -> None:
+        """Put a room back on the schedule: end its own override, and if its zone has an
+        override (a manual temperature or a skip), keep this room on the schedule anyway
+        until the next change. The zone and its other rooms keep the zone's override."""
+        zone_config = self.config.get("zones", {}).get(zone_id)
+        if not isinstance(zone_config, dict) or room_id not in zone_config.get(CONF_ROOMS, {}):
+            return
+        if zone_id not in self.manual_zone_temp:
+            await self.clear_manual_room_temperature(zone_id, room_id)
+            return
+        now = dt_util.now()
+        scheduled = self.schedule_manager.get_scheduled_temperature(zone_config, now)
+        room_config = zone_config[CONF_ROOMS][room_id]
+        self.manual_room_temp.setdefault(zone_id, {})[room_id] = {
+            "temperature": self._apply_room_offset(zone_id, room_id, room_config, scheduled),
+            "last_scheduled_temp": scheduled,
+            "follow_schedule": True,
+        }
+        _LOGGER.info("Room %s/%s follows the schedule, not its zone's override", zone_id, room_id)
+        await self._save_state()
+        await self.async_request_refresh()
 
     def is_skipped(self, zone_id: str, room_id: str | None = None) -> bool:
         """Skipped to the next scheduled temperature: the room's own override, else

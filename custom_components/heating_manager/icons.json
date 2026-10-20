@@ -8,7 +8,8 @@
               "schedule": "mdi:calendar-clock",
               "manual": "mdi:hand-back-right",
               "away": "mdi:home-export-outline",
-              "boost": "mdi:rocket-launch"
+              "boost": "mdi:rocket-launch",
+              "skip_to_next": "mdi:skip-next"
             }
           }
         }
@@ -20,7 +21,8 @@
               "schedule": "mdi:calendar-clock",
               "manual": "mdi:hand-back-right",
               "away": "mdi:home-export-outline",
-              "boost": "mdi:rocket-launch"
+              "boost": "mdi:rocket-launch",
+              "skip_to_next": "mdi:skip-next"
             }
           }
         }
