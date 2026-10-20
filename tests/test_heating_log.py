@@ -148,7 +148,7 @@ def test_storage_from_before_the_log_restores(analytics):
 
 def test_full_logs_stay_small_on_disk():
     """Worst case: every room's log full, every field filled, as Home Assistant writes it
-    (indented JSON). Under 25 KB a room."""
+    (indented JSON). Under 28 KB a room."""
     from homeassistant.helpers.json import prepare_save_json
 
     analytics = HeatingAnalytics(min_stretches=1, learning_rate=0.3)
@@ -157,13 +157,13 @@ def test_full_logs_stay_small_on_disk():
         "start_temp": 16.37, "end_temp": 21.41, "target": 21.5, "climb_needed": 5.13,
         "outdoor": -12.3, "warm_up_minutes": 123.4, "rate": 1.234, "zone_heat_minutes": 1234.5,
         "house_heat_minutes": 1234.5, "trvs_heating": 24, "trvs_heating_mean": 23.9,
-        "minutes_since_heated": 12345.6,
+        "minutes_since_heated": 12345.6, "overrun_rise": 1.23, "overrun_minutes": 123.4,
     }
     for zone in range(3):
         for room in range(5):
             analytics._room(f"zone_{zone}", f"room_{room}").log = [dict(entry)] * LOG_SIZE
     _, data = prepare_save_json(analytics.get_log_for_storage())
-    assert len(data) < 15 * 25_000          # 15 rooms
+    assert len(data) < 15 * 28_000          # 15 rooms
     restored = HeatingAnalytics(min_stretches=1, learning_rate=0.3)
     restored.restore_log(json.loads(data))
     assert restored.get_log("zone_2", "room_4")[-1] == entry
@@ -221,8 +221,10 @@ def test_log_version_changes_only_when_a_stretch_is_logged(analytics):
     assert analytics.log_version == 0                    # stretch still going
     now = feed(analytics, now, 30, 18.5, False)
     assert analytics.log_version == 1                    # heated stretch ended
-    feed(analytics, now, 30, 18.0, False)
-    assert analytics.log_version == 1                    # not heated: nothing logged
+    now = feed(analytics, now, 30, 18.0, False)
+    assert analytics.log_version == 2                    # overrun over: added to its entry
+    feed(analytics, now, 30, 17.8, False)
+    assert analytics.log_version == 2                    # nothing new to log
 
 
 # ---------------------------------------------------------------------------

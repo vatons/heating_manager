@@ -56,11 +56,13 @@
             "name": "Boiler protection",
             "data": {
               "min_boiler_on_time": "Minimum boiler on time",
-              "min_boiler_off_time": "Minimum boiler off time"
+              "min_boiler_off_time": "Minimum boiler off time",
+              "max_heating_duration": "Watchdog check after"
             },
             "data_description": {
               "min_boiler_on_time": "Once a zone (and the global entity) starts calling for heat, keep calling for at least this long. Protects the boiler from short-cycling. 0 = off.",
-              "min_boiler_off_time": "Once heat demand stops, wait at least this long before calling for heat again. 0 = off."
+              "min_boiler_off_time": "Once heat demand stops, wait at least this long before calling for heat again. 0 = off.",
+              "max_heating_duration": "Once a zone has called for heat continuously this long, rooms keeping it calling with a faulty sensor (stale, or a reading that hasn't changed for 2 hours) are held at minimum until the sensor works again. Rooms that are just slow to warm keep heating. 0 = off."
             },
             "description": "Stop the boiler short-cycling. 0 = off."
           },

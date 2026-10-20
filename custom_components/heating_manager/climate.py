@@ -362,6 +362,8 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
             "needs_heating": room_data.get("needs_heating", False),
             # Wants heat and the zone's heat source is on (what the heating rate learns from)
             "heated": room_data.get("heated", False),
+            # Held at minimum by the watchdog: sensors_stale or sensor_stuck
+            "watchdog": room_data.get("watchdog"),
             "away_mode": self.coordinator.away_mode,
 
             # Boost information (grouped)
@@ -415,6 +417,10 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
                     "warm_up_minutes": analytics.get("warm_up_minutes"),
                     "stretches": analytics.get("heating_stretches", 0),
                     "logged": analytics.get("logged_stretches", 0),
+                    # The radiators' own rate before losses to outside, and the rate it
+                    # gives at today's outdoor temperature (needs heat loss)
+                    "power_per_hour": _round(analytics.get("heating_power")),
+                    "expected_rate_per_hour": _round(analytics.get("expected_heating_rate")),
                 },
                 # Learned from stretches without heat; heat loss needs an outdoor temperature
                 "cooling": {
@@ -422,16 +428,29 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
                     "heat_loss_per_degree": _round(analytics.get("heat_loss_per_degree"), 3),
                     "stretches": analytics.get("cooling_stretches", 0),
                 },
+                # After heating stops: how far the room keeps rising, and how long until it peaks
+                "overrun": {
+                    "rise": _round(analytics.get("overrun_rise")),
+                    "minutes": analytics.get("overrun_minutes"),
+                    "stretches": analytics.get("overrun_stretches", 0),
+                },
                 "current": {
                     "state": analytics.get("current_state"),
                     "minutes": analytics.get("current_minutes"),
                     "rate_per_hour": _round(analytics.get("rate_so_far")),
                     "trend": analytics.get("trend"),
+                    # Still warming from radiators after heating stopped
+                    "overrun": analytics.get("current_overrun"),
                 },
                 "estimated_time_to_target": {
                     "minutes": analytics.get("eta_minutes"),
                     "timestamp": analytics.get("eta_timestamp"),
                     "confidence_percent": round(analytics.get("confidence", 0) * 100),
+                    # warming, cooling, or why there's no estimate: still_warming,
+                    # not_cooling, not_reaching, not_before_target_changes
+                    "status": analytics.get("eta_status"),
+                    "expected_peak": _round(analytics.get("expected_peak")),
+                    "expected_peak_minutes": analytics.get("expected_peak_minutes"),
                 },
             }
 

@@ -89,7 +89,7 @@ DEFAULT_IMPORT_PATH = "heating_manager.yaml"
 SETTINGS_SECTIONS: tuple[tuple[str, tuple[str, ...], bool], ...] = (
     ("temperatures", ("minimum_temp", "frost_protection_temp"), False),
     ("heating_demand", ("heating_demand_mode", "heating_deadband"), False),
-    ("boiler", ("min_boiler_on_time", "min_boiler_off_time"), False),
+    ("boiler", ("min_boiler_on_time", "min_boiler_off_time", "max_heating_duration"), False),
     ("sensors", ("fallback_mode", "outdoor_temperature"), False),
     ("boost", ("boost_duration",), False),
     ("trv_control", (

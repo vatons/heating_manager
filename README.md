@@ -277,6 +277,8 @@ The zone climate entity attributes include:
 
 To stop the boiler short-cycling, set **Minimum boiler on time** and **Minimum boiler off time** in **Configure → Settings → Boiler protection** (minutes, 0 = off, the default). Once a zone starts calling for heat it keeps calling for at least the on time; once it stops, it waits at least the off time before calling again. The global entity is held the same way, so zones taking turns can't cycle a shared boiler. TRVs aren't held: a room that's warm enough still closes its TRV.
 
+**Watchdog.** A faulty sensor can keep a zone calling for heat forever: one that has stopped reporting (the room heats on a fallback temperature), or one stuck on the same reading. Once a zone has called for heat continuously for **Watchdog check after** (**Configure → Settings → Boiler protection**, 240 minutes by default, 0 = off), each room keeping it calling is checked. A room whose sensors are stale, or whose reading hasn't changed at all for 2 hours while heated, is held: its TRVs go to minimum and it stops calling for heat, until its sensor works again (back on its own sensors, or a stuck reading moves). Its `watchdog` attribute shows `sensors_stale` or `sensor_stuck` meanwhile, and the reason is logged. A room that's just slow to warm, or holding steady below target on a very cold day, keeps heating. Boosts and manual temperatures are left alone.
+
 The zone entity shows `heating_demand_requested` (what the rooms want now) next to `heating_demand` (what's being signalled), and `demand_hold` (`min_on`, `min_off` or null) explains any difference. The global entity has `demand_hold` too.
 
 #### Monitoring-only zones
@@ -674,12 +676,14 @@ Heating Manager learns how each room heats up and cools down, and uses that to e
 **How it learns.** Each room's readings are split into stretches: *heated* while the room wants heat and its zone's [heat source](#heat-source) is on, *not heated* otherwise. When a stretch ends, what it showed is added to the room's long-term figures, which are saved across restarts:
 - **Warm-up time**: how long after heat starts the room begins to warm (radiators take a while to get hot).
 - **Heating rate**: how fast the room warms after that. Every reading in the stretch is fitted as a flat warm-up bending into a straight climb, so sensors that report in 0.1 °C or 0.5 °C steps, or flicker, still give the right answer.
-- **Cooling rate**: how fast the room cools without heat, ignoring the first 15 minutes after heating stops (radiators are still warm).
+- **Heating power**: what the radiators alone add (°C/h), before the room's losses to outside: the heating rate plus heat loss × (room − outside). The heating rate changes with the weather (a room warms more slowly on a cold day); the power doesn't, so it's learned from mild days and still right in winter. Needs an outdoor temperature and the room's heat loss.
+- **Overrun**: after heating stops, radiators (and the room's surfaces they've warmed) keep warming it for a while: how far it keeps rising, and how long until it peaks. It's over once the room has fallen 0.1 °C below its peak, or gone 30 minutes without a new high (at least 15 minutes, at most 2 hours after heating stopped).
+- **Cooling rate**: how fast the room cools without heat, from the peak after heating on (straight away if it wasn't just heated), so the overrun doesn't make cooling look slower.
 - **Heat loss per degree**: with an **Outdoor temperature** set (below), the cooling rate divided by how much warmer the room is than outside. Unlike the cooling rate, it doesn't change with the weather.
 
 Heated stretches need at least 10 minutes of warming and not-heated ones at least 30 minutes after the radiators cool, so short blips are ignored. Very long stretches (e.g. a room left unheated all summer) are learned from every 3 hours. Only the room's own sensors are used: while a room falls back to the zone average or its TRVs' temperature, nothing is learned.
 
-**Time to target.** While a room wants heat: its warm-up time still to come, plus the rest of the climb at its heating rate. While it's cooling to a lower target: with heat loss known, a cooling curve that slows as the room nears the outside temperature; otherwise its cooling rate.
+**Time to target.** While a room wants heat: its warm-up time still to come, plus the rest of the climb at the heating rate to expect today (its heating power less its losses at today's outdoor temperature; the learned heating rate until that's known). If the losses outweigh the radiators, there's no estimate (`not_reaching`). While it's cooling to a lower target: with heat loss known, a cooling curve that slows as the room nears the outside temperature; otherwise its cooling rate. There's no estimate, and `status` says why, while the room is still warming after heating (`still_warming`, with the peak to expect once the overrun is learned), when it's warming from something else such as cooking or sun (`not_cooling`), or when it wouldn't reach the target before the target changes: the next schedule change, or the end of a boost (`not_before_target_changes`).
 
 **Outdoor temperature.** Set in **Configure → Settings → Sensors → Outdoor temperature**: a temperature sensor or a weather entity, shared by every room. Optional; without it there's no heat loss figure, and cooling estimates use the plain cooling rate. The whole-house entity shows it as `outdoor_temperature`.
 
@@ -693,19 +697,29 @@ heating_analytics:
     warm_up_minutes: 14         # from heat starting to the room warming
     stretches: 23               # heated stretches learned from
     logged: 41                  # heated stretches in the room's log (see below)
+    power_per_hour: 2.4         # the radiators' own rate, before losses to outside
+    expected_rate_per_hour: 1.9 # at today's outdoor temperature
   cooling:
     rate_per_hour: -0.4         # °C per hour without heat
     heat_loss_per_degree: 0.035 # °C/h per °C warmer than outside (needs an outdoor temperature)
     stretches: 31
+  overrun:
+    rise: 0.6                   # °C the room keeps rising after heating stops
+    minutes: 45                 # from heating stopping to the peak
+    stretches: 12
   current:
     state: heated               # or not_heated
     minutes: 22                 # how long this stretch has lasted
     rate_per_hour: 0.9          # in this stretch so far
     trend: heating_slowly       # heating_rapidly, heating_slowly, stable, cooling_slowly, cooling_rapidly, insufficient_data
+    overrun: false              # still warming after heating stopped
   estimated_time_to_target:
     minutes: 38
     timestamp: "2026-01-15T14:30:00+00:00"
     confidence_percent: 70
+    status: warming             # warming, cooling, still_warming, not_cooling, not_reaching, not_before_target_changes
+    expected_peak: null         # still_warming: the peak to expect (°C)
+    expected_peak_minutes: null
 ```
 
 Figures appear once a room has learned from enough stretches, typically within a day of normal heating. Analytics from before 3.6 aren't carried over: they came from a method that read coarse sensors as not warming at all.
@@ -715,7 +729,7 @@ Figures appear once a room has learned from enough stretches, typically within a
 - Show the estimated time to reach target on a dashboard
 - Pre-heat rooms before a scheduled time in an automation, using the warm-up time and heating rate
 
-**Log of heated stretches.** Each room also keeps its last 200 heated stretches, with what each started from and what it showed. A room's warm-up depends on more than the room: heat joining a boiler that's already hot arrives in minutes, a cold start with every radiator calling takes much longer, and a radiator heated half an hour ago is still warm. The log is the data for warming rooms up in time for a schedule change in a future version; it doesn't change any estimate yet. It's kept in its own file (`.storage/heating_manager.analytics_log`, under 25 KB a room when full), written only after a stretch is logged, at most every 30 minutes, and when Home Assistant stops. Download it from **Settings → Devices & services → Heating Manager → ⋮ → Download diagnostics**. Each entry has:
+**Log of heated stretches.** Each room also keeps its last 200 heated stretches, with what each started from and what it showed. A room's warm-up depends on more than the room: heat joining a boiler that's already hot arrives in minutes, a cold start with every radiator calling takes much longer, and a radiator heated half an hour ago is still warm. The log is the data for warming rooms up in time for a schedule change in a future version; it doesn't change any estimate yet. It's kept in its own file (`.storage/heating_manager.analytics_log`, under 30 KB a room when full), written only after a stretch is logged, at most every 30 minutes, and when Home Assistant stops. Download it from **Settings → Devices & services → Heating Manager → ⋮ → Download diagnostics**. Each entry has:
 
 | Field | Meaning |
 |---|---|
@@ -726,6 +740,7 @@ Figures appear once a room has learned from enough stretches, typically within a
 | `zone_heat_minutes`, `house_heat_minutes` | How long heat had already been flowing in the room's zone, and in any zone, when the stretch started: 0 is a cold start; empty if heat was already on when Home Assistant started |
 | `trvs_heating`, `trvs_heating_mean` | TRVs across the house in heated rooms at the start, and on average through the stretch |
 | `minutes_since_heated` | Minutes since the room was last heated (empty if not known) |
+| `overrun_rise`, `overrun_minutes` | How far the room kept rising after this stretch's heat stopped, and how long until it peaked (empty until known) |
 
 **Disabling analytics:**
 If you don't need this feature, turn off **Heating analytics** in **Configure → Settings → Analytics**.

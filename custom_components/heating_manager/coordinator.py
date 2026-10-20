@@ -44,6 +44,10 @@ LOG_STORAGE_KEY = f"{DOMAIN}.analytics_log"
 LOG_STORAGE_VERSION = 1
 LOG_SAVE_DELAY = 1800  # seconds
 MISSING_ENTITY_GRACE = timedelta(minutes=10)  # allow integrations to load after a restart
+# Watchdog: a heated room whose reading hasn't changed at all for this long has a stuck sensor
+STUCK_SENSOR_TIME = timedelta(hours=2)
+# ...and it's working again once its reading moves this far
+SENSOR_MOVED = 0.1
 MISSING_ENTITIES_ISSUE = "missing_entities"
 
 
@@ -123,6 +127,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         min_boiler_off_time: int = 0,
         config_entry: ConfigEntry | None = None,
         outdoor_temperature_entity: str | None = None,
+        max_heating_duration: int = DEFAULT_MAX_HEATING_DURATION,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
@@ -162,6 +167,12 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         # Boiler protection: minimum on/off times for zone and global heat demand
         self.min_boiler_on_time = timedelta(minutes=min_boiler_on_time)
         self.min_boiler_off_time = timedelta(minutes=min_boiler_off_time)
+        # 0: watchdog off
+        self.max_heating_duration = timedelta(minutes=max_heating_duration) if max_heating_duration else None
+        # (zone_id, room_id) -> {"value", "since"}: the reading a heated room has held, and since when
+        self._room_reading_held: dict[tuple[str, str], dict[str, Any]] = {}
+        # (zone_id, room_id) -> {"reason", "value"}: rooms the watchdog holds at minimum
+        self.watchdog_faults: dict[tuple[str, str], dict[str, Any]] = {}
         self._zone_demand_holds: dict[str, DemandHold] = {}
         self._global_demand_hold = DemandHold()
         self.global_heating_demand = False
@@ -325,6 +336,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                         target_temp = self.minimum_temp
 
                     room_off = self.is_room_off(zone_id, room_id)
+                    watchdog = self._watchdog_fault(zone_id, room_id, room_temp, temp_metadata["source"])
 
                     # Determine if room needs heating using smart deadband logic
                     needs_heating = self.heating_logic.calculate_heating_need(
@@ -334,8 +346,9 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     if zone_data["monitoring_only"]:
                         # Monitoring-only zone: report temperatures, never heat or touch TRVs
                         needs_heating = False
-                    elif room_off:
-                        # Switched off by the user: hold TRVs at minimum and never demand heat
+                    elif room_off or watchdog:
+                        # Switched off by the user, or held by the watchdog (a faulty
+                        # sensor): hold TRVs at minimum and never demand heat
                         needs_heating = False
                         for trv_id in room_config.get("trvs", []):
                             await self.trv_controller.set_trv_setpoint(trv_id, self.minimum_temp)
@@ -360,6 +373,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                         "boost": boost_info,
                         "needs_heating": needs_heating,
                         "off": room_off,
+                        "watchdog": watchdog,
                         "trvs": room_config.get("trvs", []),
                         "sensors": sensor_entity_ids,
                         "temperature_source": temp_metadata["source"],
@@ -420,44 +434,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                     "next_period": _next_period,
                 }
 
-                # Watchdog: track continuous heating demand duration
-                if zone_data["heating_demand"]:
-                    # UTC: local-time subtraction is wall-clock and off by an hour across DST
-                    now_utc = dt_util.utcnow()
-                    if zone_id not in self._zone_heating_start:
-                        self._zone_heating_start[zone_id] = now_utc
-                    else:
-                        duration_minutes = (
-                            now_utc - self._zone_heating_start[zone_id]
-                        ).total_seconds() / 60
-                        if duration_minutes > DEFAULT_MAX_HEATING_DURATION:
-                            _LOGGER.critical(
-                                "Zone %s has been demanding heat for %.0f minutes "
-                                "(threshold: %d min). Possible sensor failure, stuck boost, "
-                                "or unreachable target temperature. Clearing overrides and "
-                                "setting all zone TRVs to minimum temperature.",
-                                zone_id,
-                                duration_minutes,
-                                DEFAULT_MAX_HEATING_DURATION,
-                            )
-                            # Clear boost and manual overrides so the next update cycle
-                            # does not immediately re-apply the high setpoints that
-                            # caused or sustained the watchdog condition.
-                            self.boost_manager.boost_state.pop(zone_id, None)
-                            self.manual_room_temp.pop(zone_id, None)
-                            self.manual_zone_temp.pop(zone_id, None)
-                            # Reset timer first so the safeguard repeats only if the
-                            # condition persists, even if a TRV command below fails
-                            self._zone_heating_start[zone_id] = now_utc
-                            for room_id, room_data in zone_data["rooms"].items():
-                                for trv_id in room_data.get("trvs", []):
-                                    await self.trv_controller.set_trv_setpoint(
-                                        trv_id, self.minimum_temp
-                                    )
-                            # Persist cleared state immediately
-                            await self._save_state()
-                else:
-                    self._zone_heating_start.pop(zone_id, None)
+                await self._run_watchdog(zone_id, zone_config, zone_data)
 
                 result[zone_id] = zone_data
 
@@ -650,6 +627,76 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             room_data["heated"] = heated
             self._room_heated.setdefault(zone_id, {})[room_id] = heated
 
+    def _watchdog_fault(self, zone_id: str, room_id: str, room_temp: float | None, source: str) -> str | None:
+        """The reason the watchdog holds this room, or None. A held room is released once
+        its sensors work again: back on its own sensors, or a stuck reading has moved."""
+        fault = self.watchdog_faults.get((zone_id, room_id))
+        if fault is None:
+            return None
+        if fault["reason"] == "sensors_stale":
+            recovered = source == "local_sensors"
+        else:
+            recovered = room_temp is None or abs(room_temp - fault["value"]) >= SENSOR_MOVED - 1e-9
+        if recovered:
+            _LOGGER.warning("Zone %s / room %s: sensor working again, heating resumes", zone_id, room_id)
+            del self.watchdog_faults[(zone_id, room_id)]
+            self._room_reading_held.pop((zone_id, room_id), None)
+            return None
+        return fault["reason"]
+
+    async def _run_watchdog(self, zone_id: str, zone_config: dict, zone_data: dict) -> None:
+        """After a zone has called for heat continuously for max_heating_duration, look for
+        rooms keeping it calling because of a faulty sensor, and hold them at minimum.
+
+        A room that's warming slowly, or holding steady below target on a cold day, isn't
+        a fault: it keeps heating. Faults are a calling room whose sensors are stale (on a
+        fallback temperature), or whose reading hasn't changed at all for STUCK_SENSOR_TIME
+        while heated. Overrides (boost, manual temperatures) are left alone.
+        """
+        now = dt_util.utcnow()  # UTC: wall-clock subtraction is off by an hour across DST
+        for room_id, room_data in zone_data["rooms"].items():
+            key = (zone_id, room_id)
+            held = self._room_reading_held.get(key)
+            if not room_data.get("heated") or room_data["temperature"] is None:
+                self._room_reading_held.pop(key, None)
+            elif held is None or abs(room_data["temperature"] - held["value"]) > 1e-9:
+                self._room_reading_held[key] = {"value": room_data["temperature"], "since": now}
+
+        if not zone_data["heating_demand"]:
+            self._zone_heating_start.pop(zone_id, None)
+            return
+        started = self._zone_heating_start.setdefault(zone_id, now)
+        if self.max_heating_duration is None or now - started <= self.max_heating_duration:
+            return
+
+        rooms_config = zone_config.get(CONF_ROOMS, {})
+        for room_id, room_data in zone_data["rooms"].items():
+            if not room_data["needs_heating"]:
+                continue
+            key = (zone_id, room_id)
+            source = room_data["temperature_source"]
+            held = self._room_reading_held.get(key)
+            if rooms_config.get(room_id, {}).get("sensors") and source not in ("local_sensors", "restored"):
+                reason = "sensors_stale"
+            elif held is not None and now - held["since"] >= STUCK_SENSOR_TIME:
+                reason = "sensor_stuck"
+            else:
+                continue
+            _LOGGER.error(
+                "Zone %s / room %s: calling for heat for over %d minutes with %s; holding "
+                "its TRVs at minimum until its sensor works again",
+                zone_id, room_id, self.max_heating_duration.total_seconds() // 60,
+                "stale sensors" if reason == "sensors_stale" else "a reading that hasn't changed",
+            )
+            self.watchdog_faults[key] = {"reason": reason, "value": room_data["temperature"]}
+            room_data["watchdog"] = reason
+            room_data["needs_heating"] = False
+            for trv_id in room_data.get("trvs", []):
+                await self.trv_controller.set_trv_setpoint(trv_id, self.minimum_temp)
+        if any(key[0] == zone_id for key in self.watchdog_faults):
+            # Look again after another full period if the zone keeps calling
+            self._zone_heating_start[zone_id] = now
+
     async def _send_trv_setpoints(self, zone_id: str, zone_data: dict, trv_commands: list[dict]) -> None:
         """Send the zone's TRV setpoints, then read back what each TRV shows.
 
@@ -670,6 +717,24 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             room_data["trv_offset_info"] = await self.trv_manager.get_trv_offset_info(
                 self.hass, zone_id, room_id, rooms.get(room_id, {}), room_data["temperature"]
             )
+
+    def _target_changes_at(self, zone_data: dict, room_data: dict, current_time) -> datetime | None:
+        """When the room's target next changes: its boost ends, else the zone's next
+        schedule change (None in away mode, or if nothing changes)."""
+        if self.away_mode:
+            return None
+        boost = room_data.get("boost")
+        if boost and boost.get("end_time"):
+            return boost["end_time"]
+        upcoming = (zone_data.get("schedule_info") or {}).get("next_period")
+        if not upcoming:
+            return None
+        try:
+            hour, minute = (int(part) for part in upcoming["start"].split(":"))
+            when = dt_util.as_local(current_time).replace(hour=hour, minute=minute, second=0, microsecond=0)
+        except (KeyError, ValueError, AttributeError):
+            return None
+        return when + timedelta(days=1) if upcoming.get("tomorrow") else when
 
     def _heat_minutes(self, zone_ids, now) -> float | None:
         """Minutes heat has been flowing in any of these zones (0: none is; None: not known)."""
@@ -715,6 +780,7 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                 room_data["heating_analytics"] = self.heating_analytics.get_analytics(
                     zone_id, room_id, room_temp, room_data["target_temperature"], room_data["needs_heating"],
                     outdoor_temp=self.outdoor_temperature, now=current_time,
+                    target_changes_at=self._target_changes_at(zone_data, room_data, current_time),
                 ).to_dict()
 
     @callback
