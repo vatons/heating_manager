@@ -1,5 +1,5 @@
 """Schedule management for Heating Manager."""
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import re
 from typing import Any
@@ -235,6 +235,27 @@ class ScheduleManager:
             zone_config.get("name", "unknown"), format_time(now), temperature,
         )
         return temperature
+
+    def upcoming_changes(
+        self, zone_config: dict, current_time: datetime, count: int = 2
+    ) -> list[tuple[datetime, float]]:
+        """The next `count` changes of temperature after current_time, as (when, temperature),
+        within a week. Changes to the temperature already in force aren't changes."""
+        changes: list[tuple[datetime, float]] = []
+        temperature = self.get_scheduled_temperature(zone_config, current_time)
+        now = self._minutes_of(current_time)
+        midnight = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        for offset in range(8):
+            day = (current_time.weekday() + offset) % 7
+            for minute, value, _ in self._day(zone_config, day):
+                if offset == 0 and minute <= now:
+                    continue
+                if value != temperature:
+                    changes.append((midnight + timedelta(days=offset, minutes=minute), value))
+                    if len(changes) == count:
+                        return changes
+                    temperature = value
+        return changes
 
     def get_period_info(
         self, zone_config: dict, current_time: datetime

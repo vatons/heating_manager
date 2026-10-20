@@ -214,13 +214,13 @@ async def running(hass, add_trvs, make_coordinator, freezer):
 
 async def test_target_changes_at_the_next_schedule_change(running):
     coordinator, zone_data, room_data = await running(12)
-    when = coordinator._target_changes_at(zone_data, room_data, local_dt(2026, 1, 14, 12))
+    when = coordinator._target_changes_at("zone_1", "room", room_data, local_dt(2026, 1, 14, 12))
     assert when == local_dt(2026, 1, 14, 21)
 
 
 async def test_target_changes_tomorrow(running):
     coordinator, zone_data, room_data = await running(22)
-    when = coordinator._target_changes_at(zone_data, room_data, local_dt(2026, 1, 14, 22))
+    when = coordinator._target_changes_at("zone_1", "room", room_data, local_dt(2026, 1, 14, 22))
     assert when == local_dt(2026, 1, 15, 6)
 
 
@@ -228,13 +228,13 @@ async def test_target_changes_when_a_boost_ends(running):
     coordinator, zone_data, room_data = await running(12)
     end = local_dt(2026, 1, 14, 13)
     room_data = {**room_data, "boost": {"temperature": 22.0, "end_time": end}}
-    assert coordinator._target_changes_at(zone_data, room_data, local_dt(2026, 1, 14, 12)) == end
+    assert coordinator._target_changes_at("zone_1", "room", room_data, local_dt(2026, 1, 14, 12)) == end
 
 
 async def test_no_target_change_in_away_mode(running):
     coordinator, zone_data, room_data = await running(12)
     coordinator.away_mode = True
-    assert coordinator._target_changes_at(zone_data, room_data, local_dt(2026, 1, 14, 12)) is None
+    assert coordinator._target_changes_at("zone_1", "room", room_data, local_dt(2026, 1, 14, 12)) is None
 
 
 async def test_attributes(hass, running):

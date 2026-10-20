@@ -358,7 +358,8 @@
             "state": {
               "schedule": "Schedule",
               "away": "Away",
-              "boost": "Boost"
+              "boost": "Boost",
+              "skip_to_next": "Skip to next"
             }
           }
         }
@@ -375,6 +376,9 @@
       },
       "cancel_boost": {
         "name": "Cancel boost"
+      },
+      "skip_to_next": {
+        "name": "Skip to next"
       }
     },
     "number": {

@@ -112,7 +112,7 @@ async def test_target_change_time_with_an_offset(house):
     coordinator, _ = await house({"lounge": (19.0, -1.0)}, schedule=schedule)
     lounge = zone(coordinator)["rooms"]["lounge"]
     assert lounge["target_temperature"] == 18.5
-    assert coordinator._target_changes_at(zone(coordinator), lounge, local_dt(hour=12)) == local_dt(hour=21)
+    assert coordinator._target_changes_at("zone_1", "lounge", lounge, local_dt(hour=12)) == local_dt(hour=21)
 
 
 # ---------------------------------------------------------------------------

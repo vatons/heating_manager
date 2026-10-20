@@ -33,6 +33,7 @@ from .const import (
     MAX_BOOST_TEMP,
     SERVICE_CLEAR_BOOST,
     SERVICE_SET_BOOST,
+    SERVICE_SKIP_TO_NEXT,
 )
 from .coordinator import HeatingManagerCoordinator
 from .entry_data import GLOBAL_UNIQUE_ID, room_unique_id, zone_unique_id
@@ -87,6 +88,11 @@ async def async_setup_entry(
         SERVICE_CLEAR_BOOST,
         {},
         "async_clear_boost_service",
+    )
+    platform.async_register_entity_service(
+        SERVICE_SKIP_TO_NEXT,
+        {},
+        "async_skip_to_next_service",
     )
 
 
@@ -567,6 +573,10 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         """Service call to clear boost for this room."""
         await self.coordinator.clear_boost(self._zone_id, self._room_id)
 
+    async def async_skip_to_next_service(self) -> None:
+        """Service call: go to the room's next scheduled temperature now."""
+        await self.coordinator.skip_to_next(self._zone_id, self._room_id)
+
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
@@ -839,6 +849,10 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
         """Service call to end the boost in every room in this zone."""
         await _async_clear_boost_rooms(self.coordinator, [self._zone_id])
 
+    async def async_skip_to_next_service(self) -> None:
+        """Service call: go to the zone's next scheduled temperature now."""
+        await self.coordinator.skip_to_next(self._zone_id)
+
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
@@ -853,7 +867,7 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
     )
-    _attr_preset_modes = ["schedule", "away", "boost"]
+    _attr_preset_modes = ["schedule", "away", "boost", "skip_to_next"]
     _attr_translation_key = "global"
 
     def __init__(
@@ -961,6 +975,9 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
             for room_data in rooms.values():
                 if room_data.get("boost"):
                     return "boost"
+
+        if any(zone_data.get("manual_zone_override", {}).get("skipped") for zone_data in self.coordinator.data.values()):
+            return "skip_to_next"
 
         return "schedule"
 
@@ -1090,6 +1107,8 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
         """Set new preset mode for all zones."""
         if preset_mode == "away":
             await self.coordinator.set_away_mode(True)
+        elif preset_mode == "skip_to_next":
+            await self._skip_all_zones()
         elif preset_mode == "boost":
             zones = self.coordinator.config.get("zones", {})
             for zone_id, zone_config in zones.items():
@@ -1120,6 +1139,24 @@ class GlobalClimate(CoordinatorEntity, ClimateEntity):
     async def async_clear_boost_service(self) -> None:
         """Service call to end every room's boost."""
         await _async_clear_boost_rooms(self.coordinator, list(self.coordinator.config.get("zones", {})))
+
+    async def async_skip_to_next_service(self) -> None:
+        """Service call: every zone goes to its next scheduled temperature now."""
+        await self._skip_all_zones()
+
+    async def _skip_all_zones(self) -> None:
+        """Skip each zone that has a change to skip to (zones without one are left)."""
+        if self.coordinator.away_mode:
+            raise ServiceValidationError("Away mode is on: turn it off to skip to the next scheduled temperature")
+        now = dt_util.now()
+        zone_ids = [
+            zone_id for zone_id, zone_config in self.coordinator.config.get("zones", {}).items()
+            if isinstance(zone_config, dict) and self.coordinator.schedule_manager.upcoming_changes(zone_config, now, 1)
+        ]
+        if not zone_ids:
+            raise ServiceValidationError("No zone has a schedule change to skip to")
+        for zone_id in zone_ids:
+            await self.coordinator.skip_to_next(zone_id)
 
     @callback
     def _handle_coordinator_update(self) -> None:
