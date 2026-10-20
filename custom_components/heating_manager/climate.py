@@ -362,6 +362,8 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
             "needs_heating": room_data.get("needs_heating", False),
             # Wants heat and the zone's heat source is on (what the heating rate learns from)
             "heated": room_data.get("heated", False),
+            # Held at minimum by the watchdog: sensors_stale or sensor_stuck
+            "watchdog": room_data.get("watchdog"),
             "away_mode": self.coordinator.away_mode,
 
             # Boost information (grouped)

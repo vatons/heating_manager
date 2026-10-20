@@ -277,6 +277,8 @@ The zone climate entity attributes include:
 
 To stop the boiler short-cycling, set **Minimum boiler on time** and **Minimum boiler off time** in **Configure → Settings → Boiler protection** (minutes, 0 = off, the default). Once a zone starts calling for heat it keeps calling for at least the on time; once it stops, it waits at least the off time before calling again. The global entity is held the same way, so zones taking turns can't cycle a shared boiler. TRVs aren't held: a room that's warm enough still closes its TRV.
 
+**Watchdog.** A faulty sensor can keep a zone calling for heat forever: one that has stopped reporting (the room heats on a fallback temperature), or one stuck on the same reading. Once a zone has called for heat continuously for **Watchdog check after** (**Configure → Settings → Boiler protection**, 240 minutes by default, 0 = off), each room keeping it calling is checked. A room whose sensors are stale, or whose reading hasn't changed at all for 2 hours while heated, is held: its TRVs go to minimum and it stops calling for heat, until its sensor works again (back on its own sensors, or a stuck reading moves). Its `watchdog` attribute shows `sensors_stale` or `sensor_stuck` meanwhile, and the reason is logged. A room that's just slow to warm, or holding steady below target on a very cold day, keeps heating. Boosts and manual temperatures are left alone.
+
 The zone entity shows `heating_demand_requested` (what the rooms want now) next to `heating_demand` (what's being signalled), and `demand_hold` (`min_on`, `min_off` or null) explains any difference. The global entity has `demand_hold` too.
 
 #### Monitoring-only zones

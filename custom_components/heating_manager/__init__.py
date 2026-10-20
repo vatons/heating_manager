@@ -42,6 +42,7 @@ from .const import (
     CONF_FROST_PROTECTION_TEMP,
     CONF_HEATING_DEADBAND,
     CONF_MIN_BOILER_OFF_TIME,
+    CONF_MAX_HEATING_DURATION,
     CONF_MIN_BOILER_ON_TIME,
     CONF_OUTDOOR_TEMPERATURE,
     CONF_MINIMUM_TEMP,
@@ -332,6 +333,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HeatingManagerConfigEntr
         derivative_smoothing=settings[CONF_DERIVATIVE_SMOOTHING],
         min_boiler_on_time=settings[CONF_MIN_BOILER_ON_TIME],
         min_boiler_off_time=settings[CONF_MIN_BOILER_OFF_TIME],
+        max_heating_duration=settings[CONF_MAX_HEATING_DURATION],
         config_entry=entry,
     )
     await coordinator.async_config_entry_first_refresh()

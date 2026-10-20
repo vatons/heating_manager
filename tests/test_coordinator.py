@@ -337,13 +337,94 @@ async def run_until_watchdog(hass, coordinator, freezer, minutes=DEFAULT_MAX_HEA
         freezer.tick(timedelta(minutes=5))
 
 
-async def test_watchdog_sets_trvs_low_and_clears_overrides(hass, basic, _frozen):
+async def test_watchdog_leaves_a_slow_room_heating_and_keeps_overrides(hass, basic, _frozen):
+    """A room that's calling for hours with a working sensor (its reading moves) is just
+    slow, e.g. on a very cold day: it keeps heating, and its boost is kept."""
     coordinator, trv = basic
     await coordinator.set_boost("zone_1", "room", temperature=22.0, duration=480)
     await run_until_watchdog(hass, coordinator, _frozen)
     assert coordinator.last_update_success
+    assert trv.target_temperature > coordinator.minimum_temp
+    assert coordinator.boost_manager.boost_state != {}
+    assert room_data(coordinator)["watchdog"] is None
+    assert coordinator.watchdog_faults == {}
+
+
+async def run_stuck(hass, coordinator, freezer, minutes, value=17.0):
+    """The sensor keeps reporting exactly the same value."""
+    for _ in range(minutes // 5 + 1):
+        hass.states.async_set(SENSOR, str(value), {"unit_of_measurement": "°C"}, force_update=True)
+        await coordinator.async_refresh()
+        freezer.tick(timedelta(minutes=5))
+
+
+async def test_watchdog_holds_a_room_with_a_stuck_sensor(hass, basic, _frozen):
+    coordinator, trv = basic
+    await coordinator.set_boost("zone_1", "room", temperature=22.0, duration=480)
+    await run_stuck(hass, coordinator, _frozen, DEFAULT_MAX_HEATING_DURATION + 5)
+    assert room_data(coordinator)["watchdog"] == "sensor_stuck"
     assert trv.target_temperature == coordinator.minimum_temp
-    assert coordinator.boost_manager.boost_state == {}
+    await refresh(coordinator)
+    assert room_data(coordinator)["needs_heating"] is False
+    assert coordinator.data["zone_1"]["heating_demand"] is False
+    assert coordinator.boost_manager.boost_state != {}              # overrides kept
+
+    # The reading moves: the sensor works, heating resumes
+    set_temp(hass, SENSOR, 16.8)
+    await refresh(coordinator)
+    assert room_data(coordinator)["watchdog"] is None
+    assert room_data(coordinator)["needs_heating"] is True
+    assert trv.target_temperature > coordinator.minimum_temp
+
+
+async def test_watchdog_waits_for_its_time_limit(hass, basic, _frozen):
+    coordinator, trv = basic
+    await run_stuck(hass, coordinator, _frozen, DEFAULT_MAX_HEATING_DURATION - 15)
+    assert room_data(coordinator)["watchdog"] is None
+    assert trv.target_temperature > coordinator.minimum_temp
+
+
+async def test_watchdog_off(hass, add_trvs, make_coordinator, _frozen):
+    trvs = await add_trvs(FakeTRV("room_trv", current_temperature=17.0))
+    set_temp(hass, SENSOR, 17.0)
+    coordinator = make_coordinator(single_room_config(), max_heating_duration=0)
+    await run_stuck(hass, coordinator, _frozen, DEFAULT_MAX_HEATING_DURATION * 2)
+    assert room_data(coordinator)["watchdog"] is None
+    assert trvs[TRV].target_temperature > coordinator.minimum_temp
+
+
+async def test_watchdog_time_limit_is_a_setting(hass, add_trvs, make_coordinator, _frozen):
+    trvs = await add_trvs(FakeTRV("room_trv", current_temperature=17.0))
+    set_temp(hass, SENSOR, 17.0)
+    coordinator = make_coordinator(single_room_config(), max_heating_duration=150)
+    await run_stuck(hass, coordinator, _frozen, 160)
+    assert room_data(coordinator)["watchdog"] == "sensor_stuck"
+
+
+async def test_watchdog_holds_a_room_with_stale_sensors(hass, add_trvs, make_coordinator, _frozen):
+    """The lounge's sensor stops reporting; it heats on the zone average (the cold hall)
+    until the watchdog holds it. The hall, with a working sensor, keeps heating."""
+    trvs = await add_trvs(FakeTRV("lounge_trv", current_temperature=17.0), FakeTRV("hall_trv", current_temperature=17.0))
+    coordinator = make_coordinator(make_config({"zone_1": {"schedule": ALL_DAY_19, "rooms": {
+        "lounge": make_room("Lounge", ["climate.lounge_trv"], ["sensor.lounge"]),
+        "hall": make_room("Hall", ["climate.hall_trv"], ["sensor.hall"]),
+    }}}))
+    set_temp(hass, "sensor.lounge", 17.0)
+    for i in range(DEFAULT_MAX_HEATING_DURATION // 5 + 2):
+        set_temp(hass, "sensor.hall", 17.0 + (i % 2) * 0.01)
+        await refresh(coordinator)
+        _frozen.tick(timedelta(minutes=5))
+    lounge = room_data(coordinator, "lounge")
+    assert lounge["temperature_source"] == "zone_average"
+    assert lounge["watchdog"] == "sensors_stale"
+    assert trvs["climate.lounge_trv"].target_temperature == coordinator.minimum_temp
+    assert room_data(coordinator, "hall")["watchdog"] is None
+    assert trvs["climate.hall_trv"].target_temperature > coordinator.minimum_temp
+
+    set_temp(hass, "sensor.lounge", 17.2)                            # reporting again
+    await refresh(coordinator)
+    assert room_data(coordinator, "lounge")["watchdog"] is None
+    assert room_data(coordinator, "lounge")["needs_heating"] is True
 
 
 async def test_watchdog_survives_failing_trv(hass, add_trvs, make_coordinator, _frozen):
@@ -351,7 +432,7 @@ async def test_watchdog_survives_failing_trv(hass, add_trvs, make_coordinator, _
     set_temp(hass, SENSOR, 17.0)
     coordinator = make_coordinator(single_room_config(trvs=(TRV, "climate.bad_trv")))
     trvs["climate.bad_trv"].fail_with = HomeAssistantError("zigbee timeout")
-    await run_until_watchdog(hass, coordinator, _frozen)
+    await run_stuck(hass, coordinator, _frozen, DEFAULT_MAX_HEATING_DURATION + 5)
     assert coordinator.last_update_success
     assert trvs[TRV].target_temperature == coordinator.minimum_temp
 

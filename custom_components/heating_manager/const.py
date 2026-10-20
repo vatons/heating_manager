@@ -76,7 +76,7 @@ DEFAULT_DERIVATIVE_SMOOTHING = 0.3   # EMA smoothing factor for derivatives
 DEFAULT_MAX_TEMP_CHANGE_PER_MIN = 0.5  # Max plausible °C/min change
 
 # Safety limits
-DEFAULT_MAX_HEATING_DURATION = 240  # minutes — log critical warning if zone heats longer
+DEFAULT_MAX_HEATING_DURATION = 240  # minutes of continuous zone demand before the watchdog checks rooms
 CONF_MAX_HEATING_DURATION = "max_heating_duration"
 
 # Heating logic constants
