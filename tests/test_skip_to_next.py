@@ -106,8 +106,8 @@ async def test_room_skips_to_its_next_temperature_with_its_offset(hass, setup):
     assert target(hass, ROOM) == 18.0                     # 19 - 1
     await press(hass, ROOM_SKIP)
     assert target(hass, ROOM) == 16.0                     # 17 - 1, not 17
-    assert attrs(hass, ROOM)["manual_override"] == {"active": True, "temperature": 16.0, "skipped": True}
-    assert attrs(hass, ROOM)["preset_mode"] == "manual"
+    assert attrs(hass, ROOM)["manual_override"] == {"active": True, "temperature": 16.0, "skipped": True, "from_zone": False}
+    assert attrs(hass, ROOM)["preset_mode"] == "skip_to_next"
     assert target(hass, STUDY) == 19.0                    # other rooms unaffected
 
 
@@ -274,3 +274,93 @@ def test_upcoming_changes():
     assert manager.upcoming_changes({"schedule": {}}, friday, 1) == []
     assert manager.upcoming_changes(zone, local_dt(2026, 1, 16, 21), 1)[0][0] == local_dt(2026, 1, 17, 9)
     assert manager.upcoming_changes(zone, friday, 1) == manager.upcoming_changes(zone, friday + timedelta(seconds=30), 1)
+
+
+# ---------------------------------------------------------------------------
+# In the dialog, and rooms under their zone's override
+# ---------------------------------------------------------------------------
+
+async def preset(hass, entity_id, mode):
+    await hass.services.async_call(
+        "climate", "set_preset_mode", {"entity_id": entity_id, "preset_mode": mode}, blocking=True,
+    )
+    await settle(hass)
+
+
+async def test_skip_is_a_preset_on_rooms_and_zones(hass, setup):
+    await setup()
+    assert "skip_to_next" in attrs(hass, ROOM)["preset_modes"]
+    assert "skip_to_next" in attrs(hass, ZONE)["preset_modes"]
+    await preset(hass, ROOM, "skip_to_next")
+    assert target(hass, ROOM) == 16.0
+    assert attrs(hass, ROOM)["preset_mode"] == "skip_to_next"
+    assert attrs(hass, ZONE)["preset_mode"] == "schedule"
+
+
+async def test_rooms_show_their_zones_skip(hass, setup):
+    await setup()
+    await preset(hass, ZONE, "skip_to_next")
+    assert attrs(hass, ZONE)["preset_mode"] == "skip_to_next"
+    for entity_id, temperature in ((ROOM, 16.0), (STUDY, 17.0)):
+        assert attrs(hass, entity_id)["preset_mode"] == "skip_to_next"
+        assert attrs(hass, entity_id)["manual_override"] == {
+            "active": True, "temperature": temperature, "skipped": True, "from_zone": True,
+        }
+
+
+async def test_rooms_show_their_zones_manual_temperature(hass, setup):
+    entry = await setup()
+    await entry.runtime_data.set_manual_zone_temperature("downstairs", 21.0)
+    await settle(hass)
+    assert attrs(hass, ROOM)["preset_mode"] == "manual"
+    assert attrs(hass, ROOM)["manual_override"] == {
+        "active": True, "temperature": 20.0, "skipped": False, "from_zone": True,   # 21 - 1
+    }
+
+
+async def test_skip_on_a_room_already_following_its_zones_skip_changes_nothing(hass, setup):
+    entry = await setup()
+    await preset(hass, ZONE, "skip_to_next")
+    await preset(hass, ROOM, "skip_to_next")
+    assert "downstairs" not in entry.runtime_data.manual_room_temp
+    assert attrs(hass, ROOM)["manual_override"]["from_zone"] is True
+
+
+async def test_schedule_on_a_room_puts_only_that_room_back(hass, setup, freezer):
+    entry = await setup()
+    await preset(hass, ZONE, "skip_to_next")
+    await preset(hass, ROOM, "schedule")
+    # This room is back on the schedule...
+    assert target(hass, ROOM) == 18.0                     # 19 - 1
+    assert attrs(hass, ROOM)["preset_mode"] == "schedule"
+    assert attrs(hass, ROOM)["manual_override"] == {
+        "active": False, "temperature": None, "skipped": False, "from_zone": False,
+    }
+    assert entry.runtime_data.is_skipped("downstairs", "lounge") is False
+    # ...the zone and its other rooms stay skipped
+    assert attrs(hass, ZONE)["preset_mode"] == "skip_to_next"
+    assert (target(hass, STUDY), attrs(hass, STUDY)["preset_mode"]) == (17.0, "skip_to_next")
+
+    # At the next change everything is on the schedule again
+    await at(hass, entry, freezer, 21)
+    assert (target(hass, ROOM), target(hass, STUDY)) == (16.0, 17.0)
+    for entity_id in (ROOM, STUDY, ZONE):
+        assert attrs(hass, entity_id)["preset_mode"] == "schedule"
+    assert entry.runtime_data.manual_room_temp.get("downstairs", {}) == {}
+
+
+async def test_schedule_on_a_room_without_a_zone_override_just_clears_its_own(hass, setup):
+    entry = await setup()
+    await preset(hass, ROOM, "skip_to_next")
+    await preset(hass, ROOM, "schedule")
+    assert target(hass, ROOM) == 18.0
+    assert entry.runtime_data.manual_room_temp.get("downstairs", {}) == {}
+
+
+async def test_zone_schedule_ends_the_zones_skip_for_every_room(hass, setup):
+    await setup()
+    await preset(hass, ZONE, "skip_to_next")
+    await preset(hass, ZONE, "schedule")
+    assert (target(hass, ROOM), target(hass, STUDY)) == (18.0, 19.0)
+    for entity_id in (ROOM, STUDY, ZONE):
+        assert attrs(hass, entity_id)["preset_mode"] == "schedule"

@@ -335,7 +335,8 @@
               "schedule": "Schedule",
               "manual": "Manual",
               "away": "Away",
-              "boost": "Boost"
+              "boost": "Boost",
+              "skip_to_next": "Skip to next"
             }
           }
         }
@@ -347,7 +348,8 @@
               "schedule": "Schedule",
               "manual": "Manual",
               "away": "Away",
-              "boost": "Boost"
+              "boost": "Boost",
+              "skip_to_next": "Skip to next"
             }
           }
         }

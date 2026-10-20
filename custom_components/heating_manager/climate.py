@@ -205,6 +205,33 @@ def _boost_temperature(hass: HomeAssistant, temperature: float | None) -> float 
     return celsius
 
 
+def _public_override(override: dict | None) -> dict[str, Any]:
+    """A manual override as shown in attributes."""
+    override = override or {}
+    return {
+        "active": bool(override.get("active")),
+        "temperature": override.get("temperature"),
+        "skipped": bool(override.get("skipped")),
+    }
+
+
+def _room_override(zone_data: dict, room_data: dict) -> dict[str, Any]:
+    """The override a room is under: its own, else its zone's (from_zone), at the room's
+    actual target (offset included). None if it follows the schedule by choice."""
+    own = room_data.get("manual_room_override") or {}
+    if own.get("active") or own.get("follows_schedule"):
+        return {**_public_override(own), "from_zone": False}
+    zone = zone_data.get("manual_zone_override") or {}
+    if zone.get("active") and not room_data.get("off") and not room_data.get("boost"):
+        return {
+            "active": True,
+            "temperature": room_data.get("target_temperature"),
+            "skipped": bool(zone.get("skipped")),
+            "from_zone": True,
+        }
+    return {"active": False, "temperature": None, "skipped": False, "from_zone": False}
+
+
 async def _async_boost_rooms(
     coordinator: HeatingManagerCoordinator,
     zone_ids: list[str],
@@ -241,7 +268,7 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
     )
     # "manual": a temperature set on the room itself, until the schedule changes
-    _attr_preset_modes = ["schedule", "manual", "away", "boost"]
+    _attr_preset_modes = ["schedule", "manual", "away", "boost", "skip_to_next"]
     _attr_translation_key = "room"
 
     def __init__(
@@ -330,8 +357,12 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
         if room_data.get("boost"):
             return "boost"
 
-        # Reported so choosing "schedule" (e.g. in the more-info dialog) can clear it
-        if room_data.get("manual_room_override", {}).get("active"):
+        # Reported so choosing "schedule" (e.g. in the more-info dialog) can clear it.
+        # Without an override of its own, the room follows its zone's.
+        override = _room_override(zone_data, room_data)
+        if override["skipped"]:
+            return "skip_to_next"
+        if override["active"]:
             return "manual"
 
         return "schedule"
@@ -381,7 +412,9 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
             },
 
             # Manual override information
-            "manual_override": room_data.get("manual_room_override", {"active": False, "temperature": None}),
+            "manual_override": _room_override(
+                self.coordinator.data.get(self._zone_id, {}), room_data
+            ),
 
             # Sensor information
             "sensors": room_data.get("sensors_status", []),
@@ -554,11 +587,15 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
                 return
             await self.coordinator.clear_boost(self._zone_id, self._room_id)
             await self.coordinator.set_manual_room_temperature(self._zone_id, self._room_id, target)
+        elif preset_mode == "skip_to_next":
+            if self.preset_mode != "skip_to_next":
+                await self.coordinator.skip_to_next(self._zone_id, self._room_id)
         elif preset_mode == "schedule":
             if self.coordinator.away_mode:
                 await self.coordinator.set_away_mode(False)
             await self.coordinator.clear_boost(self._zone_id, self._room_id)
-            await self.coordinator.clear_manual_room_temperature(self._zone_id, self._room_id)
+            # Back on the schedule, even while its zone has an override
+            await self.coordinator.follow_schedule(self._zone_id, self._room_id)
         # Coordinator refresh triggered by the above calls will update state
 
     async def async_set_boost_service(
@@ -592,7 +629,7 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
         ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
     )
     # "manual": a temperature set on the zone, until the schedule changes
-    _attr_preset_modes = ["schedule", "manual", "away", "boost"]
+    _attr_preset_modes = ["schedule", "manual", "away", "boost", "skip_to_next"]
     _attr_translation_key = "zone"
 
     def __init__(
@@ -704,6 +741,8 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
             if room_data.get("boost"):
                 return "boost"
 
+        if zone_data.get("manual_zone_override", {}).get("skipped"):
+            return "skip_to_next"
         if zone_data.get("manual_zone_override", {}).get("active"):
             return "manual"
 
@@ -752,7 +791,7 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
             },
 
             # Zone-level manual override
-            "manual_override": zone_data.get("manual_zone_override", {"active": False, "temperature": None}),
+            "manual_override": _public_override(zone_data.get("manual_zone_override")),
         }
 
         # Schedule info is pre-computed by the coordinator update cycle;
@@ -826,6 +865,9 @@ class ZoneClimate(CoordinatorEntity, ClimateEntity):
             zone_config = self.coordinator.config.get("zones", {}).get(self._zone_id, {})
             scheduled = self.coordinator.schedule_manager.get_scheduled_temperature(zone_config, dt_util.now())
             await self.coordinator.set_manual_zone_temperature(self._zone_id, scheduled)
+        elif preset_mode == "skip_to_next":
+            if self.preset_mode != "skip_to_next":
+                await self.coordinator.skip_to_next(self._zone_id)
         elif preset_mode == "schedule":
             if self.coordinator.away_mode:
                 await self.coordinator.set_away_mode(False)

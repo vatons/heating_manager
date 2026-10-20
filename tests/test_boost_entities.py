@@ -308,8 +308,8 @@ def test_icons_and_translations_cover_the_same_keys():
     for platform in icons:
         assert icons[platform].keys() == names[platform].keys(), platform
     for key, presets in (
-        ("room", {"schedule", "manual", "away", "boost"}),
-        ("zone", {"schedule", "manual", "away", "boost"}),
+        ("room", {"schedule", "manual", "away", "boost", "skip_to_next"}),
+        ("zone", {"schedule", "manual", "away", "boost", "skip_to_next"}),
         ("global", {"schedule", "away", "boost", "skip_to_next"}),
     ):
         preset_icons = icons["climate"][key]["state_attributes"]["preset_mode"]["state"]

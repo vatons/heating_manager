@@ -133,7 +133,9 @@ Each zone has a climate entity with the following features:
   - `manual` - Shown while a temperature set on the room or zone overrides the schedule. Choose `schedule` to clear it; choosing `manual` holds the current target until the schedule changes (rooms and zones only; on a zone it holds the zone's schedule temperature, and each room keeps its offset)
   - `away` - Frost protection mode
   - `boost` - Temporarily boost room temperature above the schedule
-  - `skip_to_next` (whole house only) - Every zone goes to its next scheduled temperature now (see [Skip to Next](#skip-to-next))
+  - `skip_to_next` - Go to the next scheduled temperature now (see [Skip to Next](#skip-to-next)); on the whole house, every zone
+
+A room with no override of its own shows its zone's: the zone's `manual` or `skip_to_next` preset, and `manual_override` with `from_zone: true` and the room's actual target. Choosing `schedule` on such a room puts just that room back on the schedule until the next change; the zone and its other rooms keep the zone's override. Choose `schedule` on the zone to end it for every room.
 
 ### Room Boost
 
@@ -191,8 +193,8 @@ Go to the next scheduled temperature now, instead of waiting for it: e.g. at 18:
 
 | Where | How |
 |---|---|
-| A room | `button.<zone>_<room>_skip_to_next`, or `heating_manager.skip_to_next` on its climate entity |
-| A zone | `button.<zone>_skip_to_next`, or `heating_manager.skip_to_next` on the zone's climate entity |
+| A room | The **Skip to next** preset on its climate entity, `button.<zone>_<room>_skip_to_next`, or `heating_manager.skip_to_next` on its climate entity |
+| A zone | The **Skip to next** preset on the zone's climate entity, `button.<zone>_skip_to_next`, or `heating_manager.skip_to_next` on it |
 | The whole house | The **Skip to next** preset on `climate.heating_manager`, or `heating_manager.skip_to_next` on it: every zone with a change to skip to |
 
 ```yaml
@@ -201,7 +203,7 @@ target:
   entity_id: climate.downstairs
 ```
 
-- It's a manual temperature equal to the next scheduled one, so the room or zone shows the `manual` preset meanwhile, with `manual_override.skipped: true`. Choose **Schedule** to undo it.
+- The room or zone shows the `skip_to_next` preset meanwhile, with `manual_override.skipped: true`; a zone's rooms show it too (`from_zone: true`). Choose **Schedule** to undo it: on the zone for every room, on a room for just that room.
 - A room's temperature offset is included: a room with −1 °C skips to 16 °C, not 17 °C.
 - It ends the boost (a boost would hide it). Skipping a zone also ends its rooms' own manual temperatures and boosts, so the whole zone moves.
 - If the next change is tomorrow (skipping after the evening change), it lasts until tomorrow's first change.
