@@ -183,6 +183,10 @@ class ScheduleManager:
             schedule = self._converted[key]
         return self._parse(zone_config, schedule.get(CONF_WEEKEND if day in (5, 6) else CONF_WEEKDAY) or [])
 
+    def day_changes(self, zone_config: dict, day: int) -> list[tuple[int, float]]:
+        """The changes a weekday (0=Monday) uses, as (minute, temperature), sorted by time."""
+        return self._changes(zone_config, day)
+
     def _parse(self, zone_config: dict, entries: Any) -> list[tuple[int, float]]:
         """A day's valid changes as (minute, temperature), sorted by time."""
         changes: dict[int, float] = {}

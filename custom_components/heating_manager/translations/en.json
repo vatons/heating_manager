@@ -179,37 +179,6 @@
             "monitoring_only": "Show this zone's room temperatures without heating: it never calls for heat and its TRVs, if any, are left alone."
           },
           "sections": {
-            "weekday": {
-              "name": "Weekday schedule",
-              "description": "Monday to Friday. Each change sets the temperature from its time until the next change. The last one carries on overnight until the next day's first, including from Friday into Saturday's weekend schedule. To drop the temperature overnight, add a change with the lower temperature (e.g. 22:00 → 16 °C).",
-              "data": {
-                "periods": "Temperature changes"
-              }
-            },
-            "weekend": {
-              "name": "Weekend schedule",
-              "description": "Saturday and Sunday. Sunday's last change carries on until Monday's first. With no changes, the weekend uses the 'temperature outside schedule' setting all day.",
-              "data": {
-                "same_as_weekdays": "Same as weekdays",
-                "periods": "Temperature changes"
-              },
-              "data_description": {
-                "periods": "Used when 'Same as weekdays' is off."
-              }
-            },
-            "days": {
-              "name": "Different days",
-              "description": "Optional. Give a day its own schedule, e.g. a day working from home. A day with changes here uses them instead of the weekday or weekend schedule; leave a day empty to use its usual one. Its last change carries on overnight until the next day's first, as usual. For no heating on a day, add one change at 00:00 at the 'temperature outside schedule'.",
-              "data": {
-                "monday": "Monday",
-                "tuesday": "Tuesday",
-                "wednesday": "Wednesday",
-                "thursday": "Thursday",
-                "friday": "Friday",
-                "saturday": "Saturday",
-                "sunday": "Sunday"
-              }
-            },
             "advanced": {
               "name": "Advanced",
               "description": "Heat source and last seen sensors",
@@ -238,6 +207,24 @@
             "heating_demand_mode": "When this zone calls for heat. Its climate entity shows 'heating' then, for your boiler automation.",
             "monitoring_only": "Show this zone's room temperatures without heating: it never calls for heat and its TRVs, if any, are left alone."
           },
+          "sections": {
+            "advanced": {
+              "name": "Advanced",
+              "description": "Heat source and last seen sensors",
+              "data": {
+                "heat_source": "Heat source",
+                "last_seen": "Last seen sensors"
+              },
+              "data_description": {
+                "heat_source": "Optional. An entity that's on while your boiler or heat pump is heating this zone: a switch or binary sensor (e.g. a boiler relay or OpenTherm flame sensor), or a thermostat whose action is 'heating'. Used to learn how fast rooms heat up only while heat actually flows. Without it, the zone's own call for heat is used.",
+                "last_seen": "Optional. Pair a room's temperature sensor with a separate timestamp entity (e.g. Zigbee2MQTT last_seen), to spot dead sensors sooner."
+              }
+            }
+          }
+        },
+        "schedule": {
+          "title": "Schedule",
+          "description": "{week_title}\n\n{week}\n\nEdit the changes below. This summary shows the saved schedule; it updates after you submit.",
           "sections": {
             "weekday": {
               "name": "Weekday schedule",
@@ -268,18 +255,6 @@
                 "friday": "Friday",
                 "saturday": "Saturday",
                 "sunday": "Sunday"
-              }
-            },
-            "advanced": {
-              "name": "Advanced",
-              "description": "Heat source and last seen sensors",
-              "data": {
-                "heat_source": "Heat source",
-                "last_seen": "Last seen sensors"
-              },
-              "data_description": {
-                "heat_source": "Optional. An entity that's on while your boiler or heat pump is heating this zone: a switch or binary sensor (e.g. a boiler relay or OpenTherm flame sensor), or a thermostat whose action is 'heating'. Used to learn how fast rooms heat up only while heat actually flows. Without it, the zone's own call for heat is used.",
-                "last_seen": "Optional. Pair a room's temperature sensor with a separate timestamp entity (e.g. Zigbee2MQTT last_seen), to spot dead sensors sooner."
               }
             }
           }

@@ -12,7 +12,7 @@ from custom_components.heating_manager.schedule_manager import ScheduleManager
 
 from .conftest import FakeTRV, local_dt, make_config, make_room, set_temp
 from .test_config_flow import (  # noqa: F401
-    edit_zone, entry, env, period, room, shown, start_zone, submit, zone_input, zones,
+    configure, edit_zone, entry, env, period, room, shown, start_zone, submit, zone_input, zones,
 )
 
 WEEKDAY = [{"start": "06:00", "temperature": 19.0}, {"start": "08:00", "temperature": 17.0},
@@ -142,17 +142,24 @@ async def test_zone_form_without_the_days_section(hass, entry):
     assert set(zones(entry)["upstairs"].data["schedule"]) == {"weekday", "weekend"}
 
 
-async def test_days_section_collapsed_unless_used(hass, entry):
+async def schedule_page(hass, entry):
     result = await start_zone(hass, entry, "downstairs")
-    days = next(value for key, value in result["data_schema"].schema.items() if str(key) == "days")
-    assert days.options["collapsed"] is True
+    return await configure(hass, result, shown(result))
+
+
+def days_section(result):
+    return next(value for key, value in result["data_schema"].schema.items() if str(key) == "days")
+
+
+async def test_days_section_collapsed_unless_used(hass, entry):
+    result = await schedule_page(hass, entry)
+    assert days_section(result).options["collapsed"] is True
     hass.config_entries.subentries.async_abort(result["flow_id"])
 
     await edit_zone(hass, entry, days={"wednesday": [period("07:00", 19.5)]})
-    result = await start_zone(hass, entry, "downstairs")
-    days = next(value for key, value in result["data_schema"].schema.items() if str(key) == "days")
-    assert days.options["collapsed"] is False
-    assert shown(result)["days"]["wednesday"] == [period("07:00", 19.5)]
+    result = await schedule_page(hass, entry)
+    assert days_section(result).options["collapsed"] is False
+    assert shown(result)["days"]["wednesday"] == [{"start": "07:00", "temperature": 19.5}]
     assert shown(result)["days"]["monday"] == []
 
 

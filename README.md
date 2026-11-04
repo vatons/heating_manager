@@ -818,7 +818,7 @@ Heating Manager works with Home Assistant set to °F. Sensor readings and TRV te
 
 ### Schedules
 
-Each zone has a weekday schedule (Monday to Friday) and a weekend schedule (Saturday and Sunday), or one for every day with **Same as weekdays**. A schedule is a list of temperature changes: a time, and the temperature from then until the next change.
+Each zone has a weekday schedule (Monday to Friday) and a weekend schedule (Saturday and Sunday), or one for every day with **Same as weekdays**. They're on the second page of the zone's form (**Next** after the rooms), under a summary of the week as the heating works it out, with days that have the same changes grouped and days with their own schedule marked. The summary shows the saved schedule; it updates after you submit. A schedule is a list of temperature changes: a time, and the temperature from then until the next change.
 
 ```
 06:00  19.5 °C

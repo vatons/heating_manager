@@ -109,10 +109,35 @@ async def start_zone(hass, entry, zone_id=None):
     return await hass.config_entries.subentries.async_init((entry.entry_id, "zone"), context=context)
 
 
-async def submit(hass, result, data):
+SCHEDULE_SECTIONS = ("weekday", "weekend", "days")
+
+
+async def configure(hass, result, data):
     result = await hass.config_entries.subentries.async_configure(result["flow_id"], data)
     await hass.async_block_till_done()
     return result
+
+
+async def submit(hass, result, data):
+    """Submit a zone form: on the zone page, its fields, then on the schedule page the
+    schedule fields given (the rest as shown)."""
+    if result.get("step_id") not in ("user", "reconfigure"):
+        return await configure(hass, result, data)
+    zone = {key: value for key, value in data.items() if key not in SCHEDULE_SECTIONS}
+    result = await configure(hass, result, zone)
+    if result.get("step_id") != "schedule":
+        return result                                   # done, or the zone page with errors
+    schedule = shown(result)
+    schedule.update({key: value for key, value in data.items() if key in SCHEDULE_SECTIONS})
+    return await configure(hass, result, schedule)
+
+
+async def zone_values(hass, entry, zone_id="downstairs") -> dict:
+    """What a zone's two pages show, together (the flow is left open on the schedule page)."""
+    result = await start_zone(hass, entry, zone_id)
+    values = shown(result)
+    result = await configure(hass, result, values)
+    return {**values, **shown(result)}
 
 
 def period(start, temperature):
@@ -233,7 +258,8 @@ async def test_add_zone_with_rooms(hass, entry):
     result = await start_zone(hass, entry)
     assert result["type"] is FlowResultType.FORM and result["step_id"] == "user"
     keys = [str(k) for k in result["data_schema"].schema]
-    assert keys == ["name", "rooms", "heating_demand_mode", "monitoring_only", "weekday", "weekend", "days", "advanced"]
+    assert keys == ["name", "rooms", "heating_demand_mode", "monitoring_only", "advanced"]
+    assert result["last_step"] is False                                 # "Next", to the schedule
 
     result = await submit(hass, result, zone_input(
         "Upstairs",
@@ -305,15 +331,18 @@ async def test_two_changes_at_the_same_time_are_rejected(hass, entry, weekday, w
     if weekend is not None:
         data["weekend"] = {"same_as_weekdays": False, "periods": [item(*p) for p in weekend]}
     result = await submit(hass, await start_zone(hass, entry), data)
-    assert result["type"] is FlowResultType.FORM
+    assert result["type"] is FlowResultType.FORM and result["step_id"] == "schedule"
     assert result["errors"] == {"base": "duplicate_time"}
     assert result["description_placeholders"]["duplicate"] == message
     assert "upstairs" not in zones(entry)
-    # What was entered is shown again
+    # What was entered is shown again; the zone page's values are kept
     values = shown(result)
-    assert values["name"] == "Upstairs"
-    assert values["rooms"] == [room("Study", sensors=["sensor.study"])]
     assert values["weekend"]["same_as_weekdays"] is (weekend is None)
+    values["weekday"]["periods"] = [period("06:00", 20)]
+    values["weekend"] = {"same_as_weekdays": True, "periods": []}
+    result = await submit(hass, result, values)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert zones(entry)["upstairs"].data["rooms"][0]["name"] == "Study"
 
 
 async def test_changes_in_any_order(hass, entry):
@@ -340,7 +369,7 @@ async def test_zone_validation_errors(hass, entry):
     bad = zone_input("Upstairs")
     bad["weekday"]["periods"] = [{"start": "25:00:00", "end": "08:00:00", "temperature": 20}]
     with pytest.raises(InvalidData):                                    # the time selector rejects it
-        await submit(hass, result, bad)
+        await submit(hass, await start_zone(hass, entry), bad)
     result = await submit(hass, result, zone_input("Upstairs"))
     assert result["type"] is FlowResultType.CREATE_ENTRY
 
@@ -379,15 +408,19 @@ async def test_trv_in_one_room_only(hass, entry):
 async def test_reconfigure_zone(hass, entry):
     result = await start_zone(hass, entry, "downstairs")
     assert result["step_id"] == "reconfigure"
-    # The form shows the current values
+    # The zone page shows the current values...
     values = shown(result)
     assert values["name"] == "Downstairs"
     assert values["rooms"] == [room("Lounge", ["climate.lounge_trv"], ["sensor.lounge"])]
     assert values["advanced"]["last_seen"] == [{"temperature": "sensor.lounge", "last_seen": "sensor.lounge_last_seen"}]
-    assert values["weekday"]["periods"] == [period("06:30", 19.0), period("22:00", 7.0)]
-
-    values.update(name="Ground floor", monitoring_only=True, weekday={"periods": [period("07:00", 20), period("09:00", 7)]})
-    result = await submit(hass, result, values)
+    values.update(name="Ground floor", monitoring_only=True)
+    result = await configure(hass, result, values)
+    # ...then the schedule page, with times shown without seconds
+    assert result["step_id"] == "schedule"
+    schedule = shown(result)
+    assert schedule["weekday"]["periods"] == [{"start": "06:30", "temperature": 19.0}, {"start": "22:00", "temperature": 7.0}]
+    schedule["weekday"] = {"periods": [period("07:00", 20), period("09:00", 7)]}
+    result = await configure(hass, result, schedule)
     assert result["type"] is FlowResultType.ABORT and result["reason"] == "reconfigure_successful"
     zone = zones(entry)["downstairs"]                               # id kept on rename
     assert zone.title == "Ground floor · 1 room · monitoring only"

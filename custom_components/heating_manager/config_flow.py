@@ -71,7 +71,7 @@ from .entry_data import (
     zone_subentry,
     zones_to_subentries,
 )
-from .schedule_manager import format_time, parse_time
+from .schedule_manager import ScheduleManager, format_time, parse_time
 
 TITLE = "Heating Manager"
 GLOBAL = "global"
@@ -192,8 +192,41 @@ LAST_SEEN_SELECTOR = selector.ObjectSelector(
 
 
 def _periods_for_form(changes: list[dict]) -> list[dict]:
-    """Stored "HH:MM" changes as the time selector's "HH:MM:SS" values."""
-    return [{CONF_START: f"{c[CONF_START]}:00", CONF_TEMPERATURE: c[CONF_TEMPERATURE]} for c in changes]
+    """Stored changes for the form, as "HH:MM" so the list shows 06:00, not 06:00:00
+    (the time selector reads it fine; a change added or edited in the form comes back
+    with seconds, which are dropped on saving)."""
+    return [{CONF_START: c[CONF_START], CONF_TEMPERATURE: c[CONF_TEMPERATURE]} for c in changes]
+
+
+# The zone form's second page: the schedule
+SCHEDULE_SECTIONS = (CONF_WEEKDAY, CONF_WEEKEND, CONF_DAYS)
+# Errors that belong on the schedule page
+SCHEDULE_ERRORS = ("duplicate_time", "invalid_time")
+_DAY_SHORT = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def week_summary(schedule: dict, outside_temp: float) -> str:
+    """A zone's week as a Markdown table, as the heating works it out: each day's own
+    schedule if it has one, else its weekday or weekend one. Days alike are grouped."""
+    manager = ScheduleManager(minimum_temp=outside_temp)
+    zone = {CONF_SCHEDULE: schedule or {}}
+    rows: list[tuple[list[int], str, bool]] = []
+    for day in range(7):
+        changes = manager.day_changes(zone, day)
+        text = " · ".join(f"{format_time(minute)} {temperature:g}°" for minute, temperature in changes)
+        text = text or f"{outside_temp:g}° all day (temperature outside schedule)"
+        own = bool((schedule or {}).get(DAY_KEYS[day]))
+        for days, row_text, row_own in rows:
+            if (row_text, row_own) == (text, own):
+                days.append(day)
+                break
+        else:
+            rows.append(([day], text, own))
+    lines = ["| Days | Temperature changes |", "|---|---|"]
+    for days, text, own in rows:
+        label = ", ".join(_DAY_SHORT[day] for day in days) + (" *(own schedule)*" if own else "")
+        lines.append(f"| {label} | {text} |")
+    return "\n".join(lines)
 
 
 def _periods_from_form(items: list[dict] | None) -> tuple[list[dict] | None, str | None]:
@@ -331,12 +364,27 @@ def _zone_form_values(data: dict) -> dict:
 
 
 class ZoneSubentryFlow(ConfigSubentryFlow):
-    """Add or reconfigure a zone: its rooms, schedules, demand mode and monitoring."""
+    """Add or reconfigure a zone, on two pages: the zone (rooms, demand mode, monitoring,
+    advanced), then its schedule, with a summary of the week at the top."""
+
+    _zone_input: dict[str, Any]
 
     def _outside_temperature(self) -> float:
         """The temperature outside schedule (Settings), for a new zone's default schedule."""
         settings = self._get_entry().options.get(OPT_SETTINGS) or {}
         return coerce_setting(SETTINGS_BY_KEY[CONF_MINIMUM_TEMP], settings.get(CONF_MINIMUM_TEMP, DEFAULT_MINIMUM_TEMP))
+
+    def _zone_schema(self, values: dict) -> vol.Schema:
+        """Page 1: the zone."""
+        return vol.Schema({
+            key: value for key, value in self._schema(values).schema.items() if str(key) not in SCHEDULE_SECTIONS
+        })
+
+    def _schedule_schema(self, values: dict) -> vol.Schema:
+        """Page 2: the schedule."""
+        return vol.Schema({
+            key: value for key, value in self._schema(values).schema.items() if str(key) in SCHEDULE_SECTIONS
+        })
 
     def _schema(self, values: dict) -> vol.Schema:
         weekday = values.get(CONF_WEEKDAY) or {}
@@ -488,41 +536,72 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
             data[CONF_MONITORING_ONLY] = True
         return data, errors, placeholders
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
-        values = _zone_form_values({CONF_SCHEDULE: {CONF_WEEKDAY: default_schedule(self._outside_temperature())}})
+    def _stored(self) -> dict:
+        """The zone as stored (reconfigure), or a new zone's defaults."""
+        if self.source == "reconfigure":
+            return dict(self._get_reconfigure_subentry().data)
+        default = default_schedule(self._outside_temperature())
+        return {CONF_SCHEDULE: {CONF_WEEKDAY: default, CONF_WEEKEND: default}}
+
+    def _zone_id_and_rooms(self, name: str) -> tuple[str, list[dict]]:
+        if self.source == "reconfigure":
+            data = self._get_reconfigure_subentry().data
+            return data[CONF_ZONE_ID], list(data.get(CONF_ROOMS) or [])
+        taken = {sub.data.get(CONF_ZONE_ID) for sub in _subentries(self._get_entry(), SUBENTRY_ZONE)}
+        return unique_id_for(name.strip(), taken, "zone"), []
+
+    async def _zone_page(self, step_id: str, user_input: dict[str, Any] | None) -> SubentryFlowResult:
+        """Page 1. Checked with the stored (or default) schedule; on to the schedule page."""
+        values = _zone_form_values(self._stored())
         errors: dict[str, str] = {}
         placeholders = {"duplicate": "", "room": "", "trv_conflict": ""}
         if user_input is not None:
-            taken = {sub.data.get(CONF_ZONE_ID) for sub in _subentries(self._get_entry(), SUBENTRY_ZONE)}
-            zone_id = unique_id_for(user_input.get(CONF_NAME, "").strip(), taken, "zone")
-            data, errors, placeholders = self._validate(user_input, zone_id, [])
-            if data is not None:
-                return self.async_create_entry(title=zone_title(data), data=data, unique_id=zone_id)
-            values = user_input
+            schedule_values = {key: values[key] for key in SCHEDULE_SECTIONS}
+            zone_id, old_rooms = self._zone_id_and_rooms(user_input.get(CONF_NAME, ""))
+            _, errors, placeholders = self._validate({**user_input, **schedule_values}, zone_id, old_rooms)
+            if errors.get("base") in SCHEDULE_ERRORS:
+                errors = {}
+            if not errors:
+                self._zone_input = user_input
+                return await self.async_step_schedule()
+            values = {**values, **user_input}
         return self.async_show_form(
-            step_id="user", data_schema=self._schema(values), errors=errors,
-            description_placeholders=placeholders,
+            step_id=step_id, data_schema=self._zone_schema(values), errors=errors,
+            description_placeholders=placeholders, last_step=False,
         )
+
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        return await self._zone_page("user", user_input)
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
-        entry = self._get_entry()
-        subentry = self._get_reconfigure_subentry()
-        zone_id = subentry.data[CONF_ZONE_ID]
-        values = _zone_form_values(dict(subentry.data))
+        return await self._zone_page("reconfigure", user_input)
+
+    async def async_step_schedule(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
+        """Page 2: the schedule, with the week (as saved, or a new zone's default) on top."""
+        stored = self._stored()
+        values = _zone_form_values(stored)
         errors: dict[str, str] = {}
         placeholders = {"duplicate": "", "room": "", "trv_conflict": ""}
         if user_input is not None:
-            data, errors, placeholders = self._validate(
-                user_input, zone_id, list(subentry.data.get(CONF_ROOMS) or [])
-            )
+            zone_id, old_rooms = self._zone_id_and_rooms(self._zone_input.get(CONF_NAME, ""))
+            data, errors, placeholders = self._validate({**self._zone_input, **user_input}, zone_id, old_rooms)
             if data is not None:
-                return self.async_update_and_abort(entry, subentry, title=zone_title(data), data=data)
-            values = user_input
+                if self.source == "reconfigure":
+                    return self.async_update_and_abort(
+                        self._get_entry(), self._get_reconfigure_subentry(), title=zone_title(data), data=data,
+                    )
+                return self.async_create_entry(title=zone_title(data), data=data, unique_id=zone_id)
+            values = {**values, **user_input}
+        week = week_summary(stored.get(CONF_SCHEDULE) or {}, self._outside_temperature())
         return self.async_show_form(
-            step_id="reconfigure", data_schema=self._schema(values), errors=errors,
-            description_placeholders=placeholders,
+            step_id="schedule", data_schema=self._schedule_schema(values), errors=errors,
+            description_placeholders={
+                **placeholders,
+                "week": week,
+                "week_title": "The week as saved:" if self.source == "reconfigure" else "A new zone starts with:",
+            },
         )
 
 
