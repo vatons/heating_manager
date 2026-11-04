@@ -42,6 +42,10 @@ CONF_MAX_TEMP_CHANGE_PER_MIN = "max_temp_change_per_minute"
 # Schedule keys
 CONF_WEEKDAY = "weekday"
 CONF_WEEKEND = "weekend"
+# Optional per-day schedules (0 = Monday): a day with changes uses them instead of
+# its weekday or weekend schedule
+DAY_KEYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+CONF_DAYS = "days"  # zone form section holding them
 CONF_START = "start"
 CONF_END = "end"
 CONF_TEMPERATURE = "temperature"

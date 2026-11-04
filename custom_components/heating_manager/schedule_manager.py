@@ -11,6 +11,7 @@ from .const import (
     CONF_TEMPERATURE,
     CONF_WEEKDAY,
     CONF_WEEKEND,
+    DAY_KEYS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -161,10 +162,14 @@ class ScheduleManager:
         self._converted: dict[str, dict] = {}
 
     def _changes(self, zone_config: dict, day: int) -> list[tuple[int, float]]:
-        """A weekday's (0=Monday) valid changes as (minute, temperature), sorted by time."""
+        """A weekday's (0=Monday) valid changes as (minute, temperature), sorted by time:
+        the day's own schedule if it has one, else its weekday or weekend schedule."""
         schedule = zone_config.get(CONF_SCHEDULE) or {}
         if not isinstance(schedule, dict):
             return []
+        own = schedule.get(DAY_KEYS[day])
+        if isinstance(own, list) and own:
+            return self._parse(zone_config, own)
         if is_legacy_schedule(schedule):
             # Older configuration (tests, YAML): convert once, exactly
             key = repr((schedule, self.minimum_temp))
@@ -176,7 +181,14 @@ class ScheduleManager:
                             self._warn_invalid(zone_config, entry)
                 self._converted[key] = convert_legacy_schedule(schedule, self.minimum_temp)
             schedule = self._converted[key]
-        entries = schedule.get(CONF_WEEKEND if day in (5, 6) else CONF_WEEKDAY) or []
+        return self._parse(zone_config, schedule.get(CONF_WEEKEND if day in (5, 6) else CONF_WEEKDAY) or [])
+
+    def day_changes(self, zone_config: dict, day: int) -> list[tuple[int, float]]:
+        """The changes a weekday (0=Monday) uses, as (minute, temperature), sorted by time."""
+        return self._changes(zone_config, day)
+
+    def _parse(self, zone_config: dict, entries: Any) -> list[tuple[int, float]]:
+        """A day's valid changes as (minute, temperature), sorted by time."""
         changes: dict[int, float] = {}
         for entry in entries if isinstance(entries, list) else []:
             start = parse_time(entry.get(CONF_START)) if isinstance(entry, dict) else None

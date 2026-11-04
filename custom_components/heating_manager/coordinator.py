@@ -156,8 +156,6 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         self._loaded_state = False
         self._zone_heating_start: dict[str, Any] = {}  # zone_id -> datetime when demand started
         self.rooms_off: dict[str, list[str]] = {}  # zone_id -> room_ids switched off by the user
-        # zone_id -> room_id -> whether heat was going into the room at the last update
-        self._room_heated: dict[str, dict[str, bool]] = {}
         # zone_id -> when its heat started flowing (None: already flowing at startup, not known)
         self._heat_flow_since: dict[str, datetime | None] = {}
         self._heat_flow_seen: set[str] = set()
@@ -359,8 +357,6 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
                             room_temp=room_temp, needs_heating=needs_heating,
                             # Only learn TRV offsets against the room's own sensors
                             learn_offset=temp_metadata["source"] == "local_sensors",
-                            # Heat going in since the last update, for the comparison offsets
-                            radiator_heated=self._room_heated.get(zone_id, {}).get(room_id),
                         ))
 
                     # Extract sensor entity IDs for backwards compatibility in attributes
@@ -626,7 +622,6 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
         for room_id, room_data in zone_data["rooms"].items():
             heated = bool(room_data["needs_heating"]) and heat_flowing
             room_data["heated"] = heated
-            self._room_heated.setdefault(zone_id, {})[room_id] = heated
 
     def _watchdog_fault(self, zone_id: str, room_id: str, room_temp: float | None, source: str) -> str | None:
         """The reason the watchdog holds this room, or None. A held room is released once
@@ -1184,9 +1179,8 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             # Restore TRV offset history
             trv_offset_history = data.get("trv_offset_history", {})
             self.trv_controller.restore_offset_history(trv_offset_history)
-            stored_by_heat = data.get("trv_offset_by_heat")
-            if isinstance(stored_by_heat, dict):
-                self.trv_controller.offset_by_heat = stored_by_heat
+            # trv_offset_by_heat (3.5-3.13: TRV offsets while heated / not, for
+            # comparison only) is no longer used and drops out on the next save
 
             # Restore analytics history (if analytics enabled)
             if self.heating_analytics is not None:
@@ -1233,7 +1227,6 @@ class HeatingManagerCoordinator(DataUpdateCoordinator):
             "boost_durations": self.boost_durations,
             "room_heating_state": self.heating_logic.get_state_for_storage(),
             "trv_offset_history": self.trv_controller.get_offset_history_for_storage(),
-            "trv_offset_by_heat": self.trv_controller.offset_by_heat,
         }
 
         # Add analytics history if enabled

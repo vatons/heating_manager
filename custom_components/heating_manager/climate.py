@@ -434,11 +434,6 @@ class RoomClimate(CoordinatorEntity, ClimateEntity):
                     "current_offset": round(data["current_offset"], 1) if data["current_offset"] is not None else None,
                     "learned_offset": round(data["average_offset"], 1) if data["average_offset"] is not None else None,
                     "setpoint": round(data["trv_setpoint"], 1) if data["trv_setpoint"] is not None else None,
-                    # For comparison (not used for control): offset while heated / not heated
-                    "learned_offset_heated": _round(data.get("offset_heated")),
-                    "learned_offset_unheated": _round(data.get("offset_unheated")),
-                    "samples_heated": data.get("samples_heated", 0),
-                    "samples_unheated": data.get("samples_unheated", 0),
                     # A raise held back while no heat can reach the room
                     "held": data.get("held", False),
                 }

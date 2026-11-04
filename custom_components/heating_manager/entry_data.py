@@ -66,6 +66,7 @@ from .const import (
     CONF_UPDATE_INTERVAL,
     CONF_WEEKDAY,
     CONF_WEEKEND,
+    DAY_KEYS,
     CONF_ZONES,
     DEFAULT_ANALYTICS_ENABLED,
     DEFAULT_ANALYTICS_MIN_SAMPLES,
@@ -152,33 +153,41 @@ def default_schedule(outside_temp: float = DEFAULT_MINIMUM_TEMP) -> list[dict]:
     ]
 
 
+def _clean_changes(entries: Any) -> list[dict]:
+    """A day's valid changes ({start, temperature}), sorted, one per time."""
+    changes: dict[int, float] = {}
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        start = parse_time(entry.get(CONF_START))
+        try:
+            temperature = float(entry.get(CONF_TEMPERATURE))
+        except (TypeError, ValueError):
+            continue
+        if start is not None:
+            changes.setdefault(start % (24 * 60), temperature)
+    return [
+        {CONF_START: format_time(minute), CONF_TEMPERATURE: temperature}
+        for minute, temperature in sorted(changes.items())
+    ]
+
+
 def schedule_changes(schedule: Any, outside_temp: float) -> dict[str, list[dict]]:
     """A schedule as temperature changes ({start, temperature}, sorted, one per time).
 
     Pre-3.7 periods (with an end) are converted, keeping exactly the same
-    temperature at every time of the week.
+    temperature at every time of the week. Days with their own schedule
+    (monday ... sunday) are kept when they have changes.
     """
     if not isinstance(schedule, dict):
         return {day: [] for day in DAY_TYPES}
     if is_legacy_schedule(schedule):
-        return convert_legacy_schedule(schedule, outside_temp)
-    result: dict[str, list[dict]] = {}
-    for day in DAY_TYPES:
-        changes: dict[int, float] = {}
-        for entry in schedule.get(day) or []:
-            if not isinstance(entry, dict):
-                continue
-            start = parse_time(entry.get(CONF_START))
-            try:
-                temperature = float(entry.get(CONF_TEMPERATURE))
-            except (TypeError, ValueError):
-                continue
-            if start is not None:
-                changes.setdefault(start % (24 * 60), temperature)
-        result[day] = [
-            {CONF_START: format_time(minute), CONF_TEMPERATURE: temperature}
-            for minute, temperature in sorted(changes.items())
-        ]
+        result = convert_legacy_schedule(schedule, outside_temp)
+    else:
+        result = {day: _clean_changes(schedule.get(day)) for day in DAY_TYPES}
+    for day in DAY_KEYS:
+        if changes := _clean_changes(schedule.get(day)):
+            result[day] = changes
     return result
 
 
@@ -604,6 +613,10 @@ def _normalise_schedule(zone_name: str, schedule: Any) -> dict[str, list[dict]]:
                 entry[CONF_END] = format_time(end % (24 * 60))
             result[day].append(entry)
         result[day] = sort_periods(result[day])
+    # Days with their own schedule: changes (start, temperature) only
+    for day in DAY_KEYS:
+        if changes := _clean_changes(schedule.get(day)):
+            result[day] = changes
     return result
 
 

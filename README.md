@@ -784,20 +784,6 @@ To tell Heating Manager when the heat source is on, set **Heat source** under **
 
 Without one, or while it's unavailable, the zone's own call for heat (after the minimum boiler on/off times) is used. The zone entity shows `heat_flowing` and `heat_flowing_basis` (`heat_source` or `zone_demand`), and each room shows `heated`.
 
-#### TRV offsets while heated and not heated
-
-A TRV's own sensor sits near the radiator, so it reads warmer than the room while the radiator is hot than while it's cold. Learning one offset from both may make it smaller than it should be while heating, so a TRV could shut a little early. To check before changing anything, each TRV also learns two offsets for comparison: one from readings while heat was going into the room, one from the rest. They don't affect control. They're in the room entity's `trv_control.trvs` attributes:
-
-```yaml
-learned_offset: 2.1            # used for control: every reading
-learned_offset_heated: 3.4     # while heated
-learned_offset_unheated: 1.2   # while not heated
-samples_heated: 412
-samples_unheated: 980
-```
-
-After a few days of normal heating (a few hundred samples of each), a large gap between the two means the TRVs would be better controlled with the heated offset.
-
 ### Heating Demand Modes
 
 Control how zone heating demand is calculated:
@@ -832,7 +818,7 @@ Heating Manager works with Home Assistant set to °F. Sensor readings and TRV te
 
 ### Schedules
 
-Each zone has a weekday schedule (Monday to Friday) and a weekend schedule (Saturday and Sunday), or one for every day with **Same as weekdays**. A schedule is a list of temperature changes: a time, and the temperature from then until the next change.
+Each zone has a weekday schedule (Monday to Friday) and a weekend schedule (Saturday and Sunday), or one for every day with **Same as weekdays**. They're on the second page of the zone's form (**Next** after the rooms), under a summary of the week as the heating works it out, with days that have the same changes grouped and days with their own schedule marked. The summary shows the saved schedule; it updates after you submit. A schedule is a list of temperature changes: a time, and the temperature from then until the next change.
 
 ```
 06:00  19.5 °C
@@ -847,6 +833,22 @@ Each zone has a weekday schedule (Monday to Friday) and a weekend schedule (Satu
 - A schedule with no changes uses **Temperature outside schedule** (Configure → Settings) all day.
 - New zones start with 19 °C from 06:30 and the temperature outside schedule from 22:00.
 - Times are picked with the time picker; in YAML, write them as `"07:30"` (quoted or not).
+
+**Different days.** A day can have its own schedule, e.g. a day working from home or a Sunday lie-in: open **Different days** in the zone's form (collapsed until used) and add changes to that day. A day with changes uses them instead of its weekday or weekend schedule; an empty day uses its usual one. Carry-over works the same way: the day before's last change lasts until the day's own first change, and its last change lasts into the next day. For no heating on a day, give it one change at 00:00 at the temperature outside schedule. In YAML, add `monday:` … `sunday:` lists of changes next to `weekday:` and `weekend:`:
+
+```yaml
+schedule:
+  weekday:
+    - {start: "06:00", temperature: 19.5}
+    - {start: "08:00", temperature: 18.5}
+    - {start: "21:00", temperature: 17.5}
+  weekend:
+    - {start: "08:30", temperature: 20}
+    - {start: "23:00", temperature: 16}
+  wednesday:                # home all day
+    - {start: "07:00", temperature: 19.5}
+    - {start: "21:00", temperature: 17.5}
+```
 
 **Upgrading from periods (3.6 and earlier).** Schedules used to be periods with a start and an end, and any time outside every period used the temperature outside schedule. On upgrade, and when importing such YAML, each period becomes a change at its start, and each gap after a period becomes a change to the temperature outside schedule (its value at the time). The temperature at every minute of the week stays exactly the same, including overnight between weekdays and weekends; where a day needs it for that, a change at 00:00 is added. If you later change the temperature outside schedule, update those converted changes in the zone's form too.
 
