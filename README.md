@@ -850,8 +850,6 @@ schedule:
     - {start: "21:00", temperature: 17.5}
 ```
 
-The zone entity's `schedule` attribute includes these days.
-
 **Upgrading from periods (3.6 and earlier).** Schedules used to be periods with a start and an end, and any time outside every period used the temperature outside schedule. On upgrade, and when importing such YAML, each period becomes a change at its start, and each gap after a period becomes a change to the temperature outside schedule (its value at the time). The temperature at every minute of the week stays exactly the same, including overnight between weekdays and weekends; where a day needs it for that, a change at 00:00 is added. If you later change the temperature outside schedule, update those converted changes in the zone's form too.
 
 ## Development
