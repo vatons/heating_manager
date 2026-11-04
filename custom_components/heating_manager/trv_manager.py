@@ -30,7 +30,6 @@ class TRVManager:
         room_temp: float | None,
         needs_heating: bool,
         learn_offset: bool = True,
-        radiator_heated: bool | None = None,
         allow_raise: bool = True,
     ) -> None:
         """Set the target temperature for all TRVs in a room using intelligent control.
@@ -50,7 +49,6 @@ class TRVManager:
                 zone_id, room_id, trv_id,
                 target_temp, room_temp, needs_heating,
                 learn_offset=learn_offset,
-                radiator_heated=radiator_heated,
                 allow_raise=allow_raise,
             )
 
@@ -86,19 +84,10 @@ class TRVManager:
             # Get last setpoint from TRV state
             trv_setpoint = climate_attr_celsius(hass, trv_state, "temperature")
 
-            # For comparison: the offset learned while heat was flowing and while it wasn't
-            by_heat = self.trv_controller.get_offset_by_heat(zone_id, room_id, trv_id)
-            heated = by_heat.get("heated") or {}
-            unheated = by_heat.get("unheated") or {}
-
             trv_data[trv_id] = {
                 "trv_internal_temp": trv_internal_temp,
                 "current_offset": current_offset,
                 "average_offset": avg_offset,
-                "offset_heated": heated.get("offset"),
-                "offset_unheated": unheated.get("offset"),
-                "samples_heated": heated.get("samples", 0),
-                "samples_unheated": unheated.get("samples", 0),
                 "trv_setpoint": trv_setpoint,
                 # A raise held back while no heat can reach the room
                 "held": trv_id in self.trv_controller.held,

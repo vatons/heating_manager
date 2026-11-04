@@ -784,20 +784,6 @@ To tell Heating Manager when the heat source is on, set **Heat source** under **
 
 Without one, or while it's unavailable, the zone's own call for heat (after the minimum boiler on/off times) is used. The zone entity shows `heat_flowing` and `heat_flowing_basis` (`heat_source` or `zone_demand`), and each room shows `heated`.
 
-#### TRV offsets while heated and not heated
-
-A TRV's own sensor sits near the radiator, so it reads warmer than the room while the radiator is hot than while it's cold. Learning one offset from both may make it smaller than it should be while heating, so a TRV could shut a little early. To check before changing anything, each TRV also learns two offsets for comparison: one from readings while heat was going into the room, one from the rest. They don't affect control. They're in the room entity's `trv_control.trvs` attributes:
-
-```yaml
-learned_offset: 2.1            # used for control: every reading
-learned_offset_heated: 3.4     # while heated
-learned_offset_unheated: 1.2   # while not heated
-samples_heated: 412
-samples_unheated: 980
-```
-
-After a few days of normal heating (a few hundred samples of each), a large gap between the two means the TRVs would be better controlled with the heated offset.
-
 ### Heating Demand Modes
 
 Control how zone heating demand is calculated:

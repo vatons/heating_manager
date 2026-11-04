@@ -1,6 +1,5 @@
 """Whether heat is actually going into a room: the zone's heat source entity (or, without
-one, its own call for heat), the heating analytics that learn from it, and the TRV
-offsets learned separately while heated and not heated (for comparison only)."""
+one, its own call for heat), and the heating analytics that learn from it."""
 from __future__ import annotations
 
 from datetime import timedelta
@@ -164,50 +163,36 @@ async def test_heat_source_listed_when_missing(hass, add_trvs, make_coordinator,
 
 
 # ---------------------------------------------------------------------------
-# TRV offsets while heated and not heated (comparison only)
+# TRV offsets while heated and not heated: compared in 3.5-3.13, now removed
 # ---------------------------------------------------------------------------
 
-async def test_offsets_learned_separately_for_heated_and_unheated(hass, add_trvs, make_coordinator):
-    trv = (await add_trvs(FakeTRV("room_trv", current_temperature=17.0)))[TRV]
-    set_temp(hass, SENSOR, 17.0)
-    hass.states.async_set(BOILER, "on")
-    coordinator = make_coordinator(one_room(BOILER))
-    await refresh(coordinator)        # first update: no previous state yet, so neither is learned
-    assert coordinator.trv_controller.get_offset_by_heat("zone_1", "room", TRV) == {}
-
-    trv.set_internal_temperature(21.0)    # hot radiator: +4
-    await refresh(coordinator)
-    trv.set_internal_temperature(21.0)
-    await refresh(coordinator)
-    hass.states.async_set(BOILER, "off")
-    await refresh(coordinator)            # the boiler was on until now: still a heated reading
-    trv.set_internal_temperature(18.0)    # cold radiator: +1
-    await refresh(coordinator)
-
-    by_heat = coordinator.trv_controller.get_offset_by_heat("zone_1", "room", TRV)
-    assert by_heat["heated"]["samples"] == 3
-    assert by_heat["heated"]["offset"] > 3.0
-    assert by_heat["unheated"] == {"offset": 1.0, "samples": 1}
-    # The offset used for control is unchanged: one EMA over every reading
-    info = room(coordinator)["trv_offset_info"][TRV]
-    assert info["offset_heated"] == by_heat["heated"]["offset"]
-    assert info["offset_unheated"] == 1.0
-    assert (info["samples_heated"], info["samples_unheated"]) == (3, 1)
-
-
-async def test_comparison_offsets_saved_and_restored(hass, add_trvs, make_coordinator):
-    trv = (await add_trvs(FakeTRV("room_trv", current_temperature=19.0)))[TRV]
+async def test_trv_attributes_have_no_comparison_offsets(hass, add_trvs, make_coordinator):
+    await add_trvs(FakeTRV("room_trv", current_temperature=21.0))
     set_temp(hass, SENSOR, 17.0)
     coordinator = make_coordinator(one_room())
     await refresh(coordinator)
     await refresh(coordinator)
-    await coordinator.async_save_state()
-    learned = coordinator.trv_controller.get_offset_by_heat("zone_1", "room", TRV)
-    assert learned["heated"]["samples"] == 1
+    info = room(coordinator)["trv_offset_info"][TRV]
+    assert not {"offset_heated", "offset_unheated", "samples_heated", "samples_unheated"} & set(info)
+    assert info["average_offset"] == pytest.approx(4.0)       # the offset used for control is learned as before
 
-    restarted = make_coordinator(one_room())
-    await refresh(restarted)                  # loads saved state; nothing new learned on its first update
-    assert restarted.trv_controller.get_offset_by_heat("zone_1", "room", TRV) == learned
+
+async def test_saved_comparison_offsets_are_dropped(hass, hass_storage, add_trvs, make_coordinator):
+    from custom_components.heating_manager.const import STORAGE_KEY, STORAGE_VERSION
+
+    await add_trvs(FakeTRV("room_trv", current_temperature=19.0))
+    set_temp(hass, SENSOR, 17.0)
+    hass_storage[STORAGE_KEY] = {
+        "version": STORAGE_VERSION, "key": STORAGE_KEY,
+        "data": {"version": STORAGE_VERSION,
+                 "trv_offset_history": {"zone_1": {"room": {TRV: 1.5}}},
+                 "trv_offset_by_heat": {"zone_1": {"room": {TRV: {"heated": {"offset": 3.0, "samples": 9}}}}}},
+    }
+    coordinator = make_coordinator(one_room())
+    await refresh(coordinator)
+    assert coordinator.trv_controller.offset_ema["zone_1"]["room"][TRV] != 0.0   # the rest still loads
+    await coordinator.async_save_state()
+    assert "trv_offset_by_heat" not in hass_storage[STORAGE_KEY]["data"]
 
 
 # ---------------------------------------------------------------------------
