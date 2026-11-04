@@ -197,6 +197,19 @@
                 "periods": "Used when 'Same as weekdays' is off."
               }
             },
+            "days": {
+              "name": "Different days",
+              "description": "Optional. Give a day its own schedule, e.g. a day working from home. A day with changes here uses them instead of the weekday or weekend schedule; leave a day empty to use its usual one. Its last change carries on overnight until the next day's first, as usual. For no heating on a day, add one change at 00:00 at the 'temperature outside schedule'.",
+              "data": {
+                "monday": "Monday",
+                "tuesday": "Tuesday",
+                "wednesday": "Wednesday",
+                "thursday": "Thursday",
+                "friday": "Friday",
+                "saturday": "Saturday",
+                "sunday": "Sunday"
+              }
+            },
             "advanced": {
               "name": "Advanced",
               "description": "Heat source and last seen sensors",
@@ -242,6 +255,19 @@
               },
               "data_description": {
                 "periods": "Used when 'Same as weekdays' is off."
+              }
+            },
+            "days": {
+              "name": "Different days",
+              "description": "Optional. Give a day its own schedule, e.g. a day working from home. A day with changes here uses them instead of the weekday or weekend schedule; leave a day empty to use its usual one. Its last change carries on overnight until the next day's first, as usual. For no heating on a day, add one change at 00:00 at the 'temperature outside schedule'.",
+              "data": {
+                "monday": "Monday",
+                "tuesday": "Tuesday",
+                "wednesday": "Wednesday",
+                "thursday": "Thursday",
+                "friday": "Friday",
+                "saturday": "Saturday",
+                "sunday": "Sunday"
               }
             },
             "advanced": {

@@ -834,6 +834,24 @@ Each zone has a weekday schedule (Monday to Friday) and a weekend schedule (Satu
 - New zones start with 19 °C from 06:30 and the temperature outside schedule from 22:00.
 - Times are picked with the time picker; in YAML, write them as `"07:30"` (quoted or not).
 
+**Different days.** A day can have its own schedule, e.g. a day working from home or a Sunday lie-in: open **Different days** in the zone's form (collapsed until used) and add changes to that day. A day with changes uses them instead of its weekday or weekend schedule; an empty day uses its usual one. Carry-over works the same way: the day before's last change lasts until the day's own first change, and its last change lasts into the next day. For no heating on a day, give it one change at 00:00 at the temperature outside schedule. In YAML, add `monday:` … `sunday:` lists of changes next to `weekday:` and `weekend:`:
+
+```yaml
+schedule:
+  weekday:
+    - {start: "06:00", temperature: 19.5}
+    - {start: "08:00", temperature: 18.5}
+    - {start: "21:00", temperature: 17.5}
+  weekend:
+    - {start: "08:30", temperature: 20}
+    - {start: "23:00", temperature: 16}
+  wednesday:                # home all day
+    - {start: "07:00", temperature: 19.5}
+    - {start: "21:00", temperature: 17.5}
+```
+
+The zone entity's `schedule` attribute includes these days.
+
 **Upgrading from periods (3.6 and earlier).** Schedules used to be periods with a start and an end, and any time outside every period used the temperature outside schedule. On upgrade, and when importing such YAML, each period becomes a change at its start, and each gap after a period becomes a change to the temperature outside schedule (its value at the time). The temperature at every minute of the week stays exactly the same, including overnight between weekdays and weekends; where a day needs it for that, a change at 00:00 is added. If you later change the temperature outside schedule, update those converted changes in the zone's form too.
 
 ## Development

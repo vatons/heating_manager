@@ -28,6 +28,8 @@ from homeassistant.data_entry_flow import section
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_DAYS,
+    DAY_KEYS,
     CONF_MINIMUM_TEMP,
     DEFAULT_MINIMUM_TEMP,
     CONF_HEAT_SOURCE,
@@ -315,6 +317,7 @@ def _zone_form_values(data: dict) -> dict:
             CONF_SAME: same,
             CONF_PERIODS: [] if same else _periods_for_form(schedule.get(CONF_WEEKEND, [])),
         },
+        CONF_DAYS: {day: _periods_for_form(schedule.get(day) or []) for day in DAY_KEYS},
         CONF_ADVANCED: {
             **({CONF_HEAT_SOURCE: data[CONF_HEAT_SOURCE]} if data.get(CONF_HEAT_SOURCE) else {}),
             CONF_LAST_SEEN: [
@@ -339,6 +342,7 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
         weekday = values.get(CONF_WEEKDAY) or {}
         weekend = values.get(CONF_WEEKEND) or {}
         advanced = values.get(CONF_ADVANCED) or {}
+        days = values.get(CONF_DAYS) or {}
         same = weekend.get(CONF_SAME, True)
         return vol.Schema({
             vol.Required(CONF_NAME, default=values.get(CONF_NAME, "")): str,
@@ -365,6 +369,14 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
                     vol.Optional(CONF_PERIODS, default=list(weekend.get(CONF_PERIODS) or [])): PERIODS_SELECTOR,
                 }),
                 {"collapsed": same},
+            ),
+            # Optional: a day with changes here uses them instead of its weekday or weekend schedule
+            vol.Optional(CONF_DAYS): section(
+                vol.Schema({
+                    vol.Optional(day, default=list(days.get(day) or [])): PERIODS_SELECTOR
+                    for day in DAY_KEYS
+                }),
+                {"collapsed": not any(days.get(day) for day in DAY_KEYS)},
             ),
             vol.Required(CONF_ADVANCED): section(
                 vol.Schema({
@@ -429,13 +441,21 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
         same = bool(weekend_in.get(CONF_SAME, True))
         weekday, weekday_duplicate = _periods_from_form(weekday_in.get(CONF_PERIODS))
         weekend, weekend_duplicate = ([], None) if same else _periods_from_form(weekend_in.get(CONF_PERIODS))
+        days_in = user_input.get(CONF_DAYS) or {}
+        days = {day: _periods_from_form(days_in.get(day)) for day in DAY_KEYS}
         if "base" not in errors:
-            if weekday_duplicate or weekend_duplicate:
-                errors["base"] = "duplicate_time"
-                placeholders["duplicate"] = (
-                    f"Weekdays: {weekday_duplicate}" if weekday_duplicate else f"Weekends: {weekend_duplicate}"
+            duplicates = [
+                (label, duplicate)
+                for label, (_, duplicate) in (
+                    ("Weekdays", (weekday, weekday_duplicate)), ("Weekends", (weekend, weekend_duplicate)),
+                    *((day.capitalize(), result) for day, result in days.items()),
                 )
-            elif weekday is None or weekend is None:
+                if duplicate
+            ]
+            if duplicates:
+                errors["base"] = "duplicate_time"
+                placeholders["duplicate"] = f"{duplicates[0][0]}: {duplicates[0][1]}"
+            elif weekday is None or weekend is None or any(changes is None for changes, _ in days.values()):
                 errors["base"] = "invalid_time"
         if errors:
             return None, errors, placeholders
@@ -453,7 +473,10 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
         data: dict[str, Any] = {
             CONF_ZONE_ID: zone_id,
             CONF_NAME: name,
-            CONF_SCHEDULE: {CONF_WEEKDAY: weekday, CONF_WEEKEND: weekday if same else weekend},
+            CONF_SCHEDULE: {
+                CONF_WEEKDAY: weekday, CONF_WEEKEND: weekday if same else weekend,
+                **{day: changes for day, (changes, _) in days.items() if changes},
+            },
             CONF_WEEKEND_SAME: same,
             CONF_ROOMS: match_room_ids(rooms, old_rooms, all_room_ids(entry, exclude_zone=zone_id)),
         }

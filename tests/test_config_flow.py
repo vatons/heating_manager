@@ -233,7 +233,7 @@ async def test_add_zone_with_rooms(hass, entry):
     result = await start_zone(hass, entry)
     assert result["type"] is FlowResultType.FORM and result["step_id"] == "user"
     keys = [str(k) for k in result["data_schema"].schema]
-    assert keys == ["name", "rooms", "heating_demand_mode", "monitoring_only", "weekday", "weekend", "advanced"]
+    assert keys == ["name", "rooms", "heating_demand_mode", "monitoring_only", "weekday", "weekend", "days", "advanced"]
 
     result = await submit(hass, result, zone_input(
         "Upstairs",
